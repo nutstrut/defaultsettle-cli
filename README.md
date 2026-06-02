@@ -20,13 +20,29 @@ Agent Activation
 
 ### `defaultsettle activate`
 
-Purpose: Register or activate an autonomous agent.
+Purpose: Register and natively activate an autonomous agent.
 
-Future output:
+Example:
 
-- `activation_id`
-- `agent_profile_url`
-- `badge_markdown`
+```bash
+defaultsettle activate agent:example-001
+defaultsettle activate agent:example-001 --display-name "Example Agent"
+defaultsettle activate agent:example-001 --base-url https://defaultverifier.com
+defaultsettle activate agent:example-001 --json
+```
+
+Human output includes:
+
+- agent registration
+- activation receipt generation
+- continuity initialization
+- evidence chain creation
+- agent profile availability
+- badge availability
+
+The command prints Agent ID, activation stage and type, SAR and Continuity
+receipt IDs when returned, chain ID when returned, and Explorer/profile and
+badge URLs when returned.
 
 ### `defaultsettle verify`
 
@@ -66,11 +82,5 @@ defaultsettle profile agent:start-loop-test-008 --json
 Run the CLI module directly:
 
 ```bash
-python -m defaultsettle.cli activate
-```
-
-Placeholder commands currently print:
-
-```text
-coming soon
+python -m defaultsettle.cli activate agent:example-001
 ```

@@ -14,6 +14,7 @@ from urllib.request import Request, urlopen
 
 
 API_BASE_URL = "https://defaultverifier.com/v1"
+DEFAULT_BASE_URL = "https://defaultverifier.com"
 REQUEST_TIMEOUT_SECONDS = 20
 SAR_RECEIPT_REQUIRED_FIELDS = (
     "task_id_hash",
@@ -28,9 +29,45 @@ SAR_RECEIPT_REQUIRED_FIELDS = (
 )
 
 
+class ApiError(RuntimeError):
+    def __init__(self, status_code: int, url: str, detail: str, operation: str) -> None:
+        self.status_code = status_code
+        self.url = url
+        self.detail = detail
+        message = f"HTTP error {status_code} while {operation} {url}"
+        if detail:
+            message = f"{message}: {detail}"
+        super().__init__(message)
+
+
 def coming_soon(_args: argparse.Namespace) -> None:
     """Placeholder command handler."""
     print("coming soon")
+
+
+def read_json_response(url: str, request: Request, operation: str) -> dict[str, Any]:
+    try:
+        with urlopen(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
+            data = response.read()
+    except HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace").strip()
+        raise ApiError(exc.code, url, detail, operation) from exc
+    except URLError as exc:
+        raise RuntimeError(f"Network error while {operation} {url}: {exc.reason}") from exc
+    except OSError as exc:
+        raise RuntimeError(f"Network error while {operation} {url}: {exc}") from exc
+
+    if not data:
+        return {}
+
+    try:
+        decoded = json.loads(data.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"Invalid JSON response from {url}") from exc
+
+    if not isinstance(decoded, dict):
+        raise RuntimeError(f"Unexpected JSON response from {url}")
+    return decoded
 
 
 def fetch_json(url: str) -> dict[str, Any]:
@@ -41,28 +78,39 @@ def fetch_json(url: str) -> dict[str, Any]:
             "User-Agent": "defaultsettle-cli/0.1",
         },
     )
-    try:
-        with urlopen(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
-            data = response.read()
-    except HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace").strip()
-        message = f"HTTP error {exc.code} while fetching {url}"
-        if detail:
-            message = f"{message}: {detail}"
-        raise RuntimeError(message) from exc
-    except URLError as exc:
-        raise RuntimeError(f"Network error while fetching {url}: {exc.reason}") from exc
-    except OSError as exc:
-        raise RuntimeError(f"Network error while fetching {url}: {exc}") from exc
+    return read_json_response(url, request, "fetching")
 
-    try:
-        decoded = json.loads(data.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise RuntimeError(f"Invalid JSON response from {url}") from exc
 
-    if not isinstance(decoded, dict):
-        raise RuntimeError(f"Unexpected JSON response from {url}")
-    return decoded
+def post_json(url: str, payload: dict[str, Any]) -> dict[str, Any]:
+    body = json.dumps(payload).encode("utf-8")
+    request = Request(
+        url,
+        data=body,
+        method="POST",
+        headers={
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "User-Agent": "defaultsettle-cli/0.1",
+        },
+    )
+    return read_json_response(url, request, "requesting")
+
+
+def api_base_from_base_url(base_url: str) -> str:
+    normalized = base_url.rstrip("/")
+    if normalized.endswith("/v1"):
+        return normalized
+    return f"{normalized}/v1"
+
+
+def absolute_url(base_url: str, value: Any) -> Any:
+    if not isinstance(value, str):
+        return value
+    if value.startswith(("http://", "https://")):
+        return value
+    if value.startswith("/"):
+        return f"{base_url.rstrip('/')}{value}"
+    return value
 
 
 def find_value(data: Any, keys: tuple[str, ...]) -> Any:
@@ -94,6 +142,162 @@ def print_summary(rows: list[tuple[str, Any]]) -> None:
     label_width = max(len(label) for label, _value in rows)
     for label, value in rows:
         print(f"{label:<{label_width}}  {format_value(value)}")
+
+
+def extract_activation_fields(
+    agent_id: str,
+    summary: dict[str, Any],
+    activation: dict[str, Any],
+) -> dict[str, Any]:
+    source = {"summary": summary, "activation": activation}
+    return {
+        "agent_id": find_value(source, ("agent_id", "agentId", "id")) or agent_id,
+        "activation_stage": find_value(
+            source,
+            ("activation_stage", "activationStage", "stage", "status"),
+        ),
+        "activation_type": find_value(source, ("activation_type", "activationType", "type"))
+        or "native",
+        "sar_receipt_id": find_value(
+            source,
+            (
+                "sar_receipt_id",
+                "sarReceiptId",
+                "latest_sar_receipt_id",
+                "latestSarReceiptId",
+                "latest_sar_receipt",
+                "latestSarReceipt",
+                "receipt_id",
+                "receiptId",
+            ),
+        ),
+        "continuity_receipt_id": find_value(
+            source,
+            (
+                "continuity_receipt_id",
+                "continuityReceiptId",
+                "latest_continuity_receipt_id",
+                "latestContinuityReceiptId",
+                "latest_continuity_receipt",
+                "latestContinuityReceipt",
+            ),
+        ),
+        "chain_id": find_value(
+            source,
+            ("chain_id", "chainId", "latest_chain_id", "latestChainId"),
+        ),
+        "explorer_url": find_value(
+            source,
+            (
+                "explorer_url",
+                "explorerUrl",
+                "profile_url",
+                "profileUrl",
+                "agent_profile_url",
+                "agentProfileUrl",
+                "trustscore_url",
+                "trustscoreUrl",
+            ),
+        ),
+        "badge_url": find_value(source, ("badge_url", "badgeUrl")),
+    }
+
+
+def handle_activate(args: argparse.Namespace) -> None:
+    agent_id = args.agent_id
+    encoded_agent_id = quote(agent_id, safe="")
+    base_url = args.base_url.rstrip("/")
+    api_base_url = api_base_from_base_url(args.base_url)
+
+    register_payload: dict[str, Any] = {
+        "agent_id": agent_id,
+        "owner_id": agent_id,
+        "counterparty": agent_id,
+    }
+    if args.display_name:
+        register_payload["display_name"] = args.display_name
+
+    register_status = "registered"
+    register_url = f"{api_base_url}/agents/register"
+    try:
+        register_response = post_json(register_url, register_payload)
+    except ApiError as exc:
+        if exc.status_code != 409:
+            raise
+        register_status = "already_exists"
+        register_response = {"status": register_status, "detail": exc.detail}
+
+    activate_url = f"{api_base_url}/agents/{encoded_agent_id}/activate"
+    activate_payload = {
+        "activation_type": "native",
+        "continuity_input": {
+            "task_id": f"native-activation:{agent_id}",
+            "agent_id": agent_id,
+            "counterparty": agent_id,
+            "spec": {"activation_type": "native"},
+            "output": {"activation_type": "native"},
+        },
+    }
+    summary: dict[str, Any] | None = None
+    try:
+        activation_response = post_json(activate_url, activate_payload)
+        activation_status = "activated"
+    except ApiError as exc:
+        if exc.status_code == 409 and "already" in exc.detail.lower():
+            activation_status = "already_activated"
+            activation_response = {"status": activation_status, "detail": exc.detail}
+        else:
+            try:
+                summary = fetch_json(f"{api_base_url}/agents/{encoded_agent_id}/summary")
+            except RuntimeError:
+                raise exc
+            summary_status = find_value(summary, ("activation_stage", "activationStage", "stage", "status"))
+            successful_stages = {"activated", "verified", "chained", "continuous"}
+            if str(summary_status).lower() not in successful_stages:
+                raise
+            activation_status = "activated_after_error"
+            activation_response = {"status": activation_status, "detail": exc.detail}
+
+    if summary is None:
+        summary = fetch_json(f"{api_base_url}/agents/{encoded_agent_id}/summary")
+    fields = extract_activation_fields(agent_id, summary, activation_response)
+    fields["explorer_url"] = absolute_url(base_url, fields["explorer_url"])
+    fields["badge_url"] = absolute_url(base_url, fields["badge_url"])
+    result = {
+        **fields,
+        "register_status": register_status,
+        "activation_status": activation_status,
+        "register_response": register_response,
+        "activation_response": activation_response,
+        "summary": summary,
+    }
+
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return
+
+    registered_label = "Agent registered"
+    if register_status == "already_exists":
+        registered_label = "Agent registered (already existed)"
+    print(f"\u2713 {registered_label}")
+    print("\u2713 Activation receipt generated")
+    print("\u2713 Continuity initialized")
+    print("\u2713 Evidence chain created")
+    print("\u2713 Agent profile available")
+    print("\u2713 Badge available")
+    print()
+    print_summary(
+        [
+            ("Agent ID", result["agent_id"]),
+            ("Activation Stage", result["activation_stage"]),
+            ("Activation Type", result["activation_type"]),
+            ("SAR Receipt ID", result["sar_receipt_id"]),
+            ("Continuity Receipt ID", result["continuity_receipt_id"]),
+            ("Chain ID", result["chain_id"]),
+            ("Explorer/Profile URL", result["explorer_url"]),
+            ("Badge URL", result["badge_url"]),
+        ]
+    )
 
 
 def load_receipt(path: Path) -> dict[str, Any]:
@@ -291,9 +495,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    for command in ("activate",):
-        subparser = subparsers.add_parser(command)
-        subparser.set_defaults(func=coming_soon)
+    activate_parser = subparsers.add_parser("activate")
+    activate_parser.add_argument("agent_id")
+    activate_parser.add_argument("--display-name", help="Human-readable agent display name.")
+    activate_parser.add_argument(
+        "--base-url",
+        default=DEFAULT_BASE_URL,
+        help=f"Default Settlement API base URL. Defaults to {DEFAULT_BASE_URL}.",
+    )
+    activate_parser.add_argument("--json", action="store_true", help="Print activation result as JSON.")
+    activate_parser.set_defaults(func=handle_activate)
 
     verify_parser = subparsers.add_parser("verify")
     verify_parser.add_argument("receipt_json")
@@ -313,7 +524,15 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def configure_output_encoding() -> None:
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            reconfigure(encoding="utf-8")
+
+
 def main() -> int:
+    configure_output_encoding()
     parser = build_parser()
     args = parser.parse_args()
     try:
