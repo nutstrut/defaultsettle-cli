@@ -36,9 +36,23 @@ Purpose: Verify SAR receipts.
 
 Purpose: Inspect linked SAR + Continuity evidence.
 
+Example:
+
+```bash
+defaultsettle chain sha256:8b1aafe5dc4f1273220f1d6e634e7787e1c75df55e95dbe1cc6cd689182af688
+defaultsettle chain <chain_id> --json
+```
+
 ### `defaultsettle profile`
 
 Purpose: Retrieve Agent Profile / Public Trust Report.
+
+Example:
+
+```bash
+defaultsettle profile agent:start-loop-test-008
+defaultsettle profile agent:start-loop-test-008 --json
+```
 
 ## Development
 
@@ -48,7 +62,7 @@ Run the CLI module directly:
 python -m defaultsettle.cli activate
 ```
 
-Each scaffolded command currently prints:
+Placeholder commands currently print:
 
 ```text
 coming soon
