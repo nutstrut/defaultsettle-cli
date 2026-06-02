@@ -1,0 +1,8 @@
+{
+  "receipt_id": "sar_example_001",
+  "agent_id": "agent_example_001",
+  "receipt_type": "SAR",
+  "status": "pending_verification",
+  "issued_at": "2026-06-02T00:00:00Z",
+  "evidence_chain": []
+}

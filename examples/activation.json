@@ -1,0 +1,6 @@
+{
+  "activation_id": "act_example_001",
+  "agent_id": "agent_example_001",
+  "agent_profile_url": "https://explorer.defaultsettle.example/agents/agent_example_001",
+  "badge_markdown": "[![Default Settlement](https://explorer.defaultsettle.example/badges/agent_example_001.svg)](https://explorer.defaultsettle.example/agents/agent_example_001)"
+}
