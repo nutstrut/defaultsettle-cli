@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
+from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
@@ -13,6 +15,17 @@ from urllib.request import Request, urlopen
 
 API_BASE_URL = "https://defaultverifier.com/v1"
 REQUEST_TIMEOUT_SECONDS = 20
+SAR_RECEIPT_REQUIRED_FIELDS = (
+    "task_id_hash",
+    "verdict",
+    "confidence",
+    "reason_code",
+    "ts",
+    "verifier_kid",
+    "counterparty",
+    "receipt_id",
+    "sig",
+)
 
 
 def coming_soon(_args: argparse.Namespace) -> None:
@@ -81,6 +94,87 @@ def print_summary(rows: list[tuple[str, Any]]) -> None:
     label_width = max(len(label) for label, _value in rows)
     for label, value in rows:
         print(f"{label:<{label_width}}  {format_value(value)}")
+
+
+def load_receipt(path: Path) -> dict[str, Any]:
+    try:
+        with path.open("r", encoding="utf-8") as receipt_file:
+            data = json.load(receipt_file)
+    except FileNotFoundError as exc:
+        raise RuntimeError(f"Receipt file not found: {path}") from exc
+    except OSError as exc:
+        raise RuntimeError(f"Could not read receipt file {path}: {exc}") from exc
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"Invalid JSON in receipt file {path}: {exc}") from exc
+
+    if not isinstance(data, dict):
+        raise RuntimeError("Receipt file must contain a JSON object")
+
+    if "receipt_v0_1" in data:
+        receipt = data["receipt_v0_1"]
+        if not isinstance(receipt, dict):
+            raise RuntimeError("receipt_v0_1 must be a JSON object")
+        return receipt
+
+    return data
+
+
+def compute_receipt_id(receipt: dict[str, Any]) -> str:
+    canonical_fields = {
+        key: value
+        for key, value in receipt.items()
+        if key not in {"receipt_id", "sig"}
+    }
+    canonical_json = json.dumps(canonical_fields, sort_keys=True, separators=(",", ":"))
+    digest = hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()
+    return f"sha256:{digest}"
+
+
+def verify_sar_receipt(receipt: dict[str, Any]) -> dict[str, Any]:
+    missing_fields = [
+        field
+        for field in SAR_RECEIPT_REQUIRED_FIELDS
+        if field not in receipt or receipt[field] in (None, "")
+    ]
+    if missing_fields:
+        raise RuntimeError(f"Missing required SAR receipt fields: {', '.join(missing_fields)}")
+
+    computed_receipt_id = compute_receipt_id(receipt)
+    integrity = "PASS" if computed_receipt_id == receipt["receipt_id"] else "FAIL"
+    return {
+        "receipt_id": receipt["receipt_id"],
+        "computed_receipt_id": computed_receipt_id,
+        "integrity": integrity,
+        "verdict": receipt["verdict"],
+        "reason_code": receipt["reason_code"],
+        "timestamp": receipt["ts"],
+        "verifier_kid": receipt["verifier_kid"],
+        "signature_verification": "not_implemented",
+    }
+
+
+def handle_verify(args: argparse.Namespace) -> int:
+    receipt = load_receipt(Path(args.receipt_json))
+    result = verify_sar_receipt(receipt)
+
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        print_summary(
+            [
+                ("Receipt ID", result["receipt_id"]),
+                ("Computed Receipt ID", result["computed_receipt_id"]),
+                ("Verdict", result["verdict"]),
+                ("Reason Code", result["reason_code"]),
+                ("Timestamp", result["timestamp"]),
+                ("Verifier Key ID", result["verifier_kid"]),
+                ("Integrity", result["integrity"]),
+            ]
+        )
+        print()
+        print("Signature verification coming soon; local integrity check only.")
+
+    return 0 if result["integrity"] == "PASS" else 1
 
 
 def handle_profile(args: argparse.Namespace) -> None:
@@ -197,9 +291,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    for command in ("activate", "verify"):
+    for command in ("activate",):
         subparser = subparsers.add_parser(command)
         subparser.set_defaults(func=coming_soon)
+
+    verify_parser = subparsers.add_parser("verify")
+    verify_parser.add_argument("receipt_json")
+    verify_parser.add_argument("--json", action="store_true", help="Print verification result as JSON.")
+    verify_parser.set_defaults(func=handle_verify)
 
     profile_parser = subparsers.add_parser("profile")
     profile_parser.add_argument("agent_id")
@@ -218,11 +317,11 @@ def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
     try:
-        args.func(args)
+        result = args.func(args)
     except RuntimeError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
-    return 0
+    return int(result or 0)
 
 
 if __name__ == "__main__":

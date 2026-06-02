@@ -1,8 +1,11 @@
 {
-  "receipt_id": "sar_example_001",
-  "agent_id": "agent_example_001",
-  "receipt_type": "SAR",
-  "status": "pending_verification",
-  "issued_at": "2026-06-02T00:00:00Z",
-  "evidence_chain": []
+  "task_id_hash": "sha256:cb1e087ca1ccbb850eb5edb037cf3bc941b5856d73068f61fbeed6b4a007b5fa",
+  "verdict": "PASS",
+  "confidence": 1.0,
+  "reason_code": "SPEC_MATCH",
+  "ts": "2026-06-01T05:24:03.901412Z",
+  "verifier_kid": "sar-prod-ed25519-03",
+  "counterparty": "wallet:start-page:agent-start-loop-test-008",
+  "receipt_id": "sha256:537be8dab6bb424e6cb8e6a63572cc5bc0651cc35d3468cda14629fd51fd4f0e",
+  "sig": "base64url:TJiGDEnMjABMTVInvJogqtQYxwZbt6_9DDnT-KlfRBSlFElnQnnVaqPhhmytURyE7M68W0xNZxyUsTrZ9Vx1Dg"
 }

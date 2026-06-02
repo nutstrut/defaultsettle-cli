@@ -32,6 +32,13 @@ Future output:
 
 Purpose: Verify SAR receipts.
 
+Example:
+
+```bash
+defaultsettle verify examples/receipt.json
+defaultsettle verify examples/receipt.json --json
+```
+
 ### `defaultsettle chain`
 
 Purpose: Inspect linked SAR + Continuity evidence.
