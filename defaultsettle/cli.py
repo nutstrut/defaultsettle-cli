@@ -510,11 +510,21 @@ def handle_verify(args: argparse.Namespace) -> int:
 def handle_profile(args: argparse.Namespace) -> None:
     agent_id = args.agent_id
     encoded_agent_id = quote(agent_id, safe="")
+    base_url = DEFAULT_BASE_URL
     data = fetch_json(f"{API_BASE_URL}/agents/{encoded_agent_id}/summary")
 
     if args.json:
         print(json.dumps(data, indent=2, sort_keys=True))
         return
+
+    badge_url = absolute_url(base_url, find_value(data, ("badge_url", "badgeUrl")))
+    explorer_url = absolute_url(
+        base_url,
+        find_value(
+            data,
+            ("explorer_url", "explorerUrl", "trustscore_url", "trustscoreUrl", "profile_url", "profileUrl"),
+        ),
+    )
 
     print_summary(
         [
@@ -557,14 +567,8 @@ def handle_profile(args: argparse.Namespace) -> None:
                 "Latest Chain ID",
                 find_value(data, ("latest_chain_id", "latestChainId", "chain_id", "chainId")),
             ),
-            ("Badge URL", find_value(data, ("badge_url", "badgeUrl"))),
-            (
-                "Explorer URL",
-                find_value(
-                    data,
-                    ("explorer_url", "explorerUrl", "trustscore_url", "trustscoreUrl", "profile_url", "profileUrl"),
-                ),
-            ),
+            ("Badge URL", badge_url),
+            ("Explorer URL", explorer_url),
         ]
     )
 
