@@ -1,0 +1,16 @@
+{
+  "activation_stage": "chained",
+  "agent_id": "agent:cli-speedrun-20260608-160425-124d18",
+  "badge_url": "https://defaultverifier.com/badge/agent:cli-speedrun-20260608-160425-124d18.svg",
+  "base_url": "https://defaultverifier.com",
+  "chain_id": "sha256:7545bb70a56f1dc00164ee3f030ad77c6fe54df9d03e615d1d27439c4670f16b",
+  "completed_at": "2026-06-08T16:04:27+00:00",
+  "continuity_receipt_id": "sha256:b4110704055f866ee0eb05c9fb8954550d3b779a764df1133d3366bf4a696717",
+  "error": null,
+  "explorer_url": "https://defaultverifier.com/trustscore/agent:cli-speedrun-20260608-160425-124d18",
+  "origin": "cli-speedrun",
+  "sar_receipt_id": "bbd0ce8ad342952d6c622b676dd52258a11100554d8c0624094e202c7cba045f",
+  "started_at": "2026-06-08T16:04:25+00:00",
+  "success": true,
+  "time_to_verified_receipt_seconds": 2.285
+}

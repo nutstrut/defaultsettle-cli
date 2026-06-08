@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
 import hashlib
 import json
+import secrets
 import sys
+import time
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -203,19 +206,22 @@ def extract_activation_fields(
     }
 
 
-def handle_activate(args: argparse.Namespace) -> None:
-    agent_id = args.agent_id
+def activate_agent(
+    agent_id: str,
+    base_url_value: str,
+    display_name: str | None = None,
+) -> dict[str, Any]:
     encoded_agent_id = quote(agent_id, safe="")
-    base_url = args.base_url.rstrip("/")
-    api_base_url = api_base_from_base_url(args.base_url)
+    base_url = base_url_value.rstrip("/")
+    api_base_url = api_base_from_base_url(base_url_value)
 
     register_payload: dict[str, Any] = {
         "agent_id": agent_id,
         "owner_id": agent_id,
         "counterparty": agent_id,
     }
-    if args.display_name:
-        register_payload["display_name"] = args.display_name
+    if display_name:
+        register_payload["display_name"] = display_name
 
     register_status = "registered"
     register_url = f"{api_base_url}/agents/register"
@@ -263,7 +269,7 @@ def handle_activate(args: argparse.Namespace) -> None:
     fields = extract_activation_fields(agent_id, summary, activation_response)
     fields["explorer_url"] = absolute_url(base_url, fields["explorer_url"])
     fields["badge_url"] = absolute_url(base_url, fields["badge_url"])
-    result = {
+    return {
         **fields,
         "register_status": register_status,
         "activation_status": activation_status,
@@ -271,6 +277,10 @@ def handle_activate(args: argparse.Namespace) -> None:
         "activation_response": activation_response,
         "summary": summary,
     }
+
+
+def handle_activate(args: argparse.Namespace) -> None:
+    result = activate_agent(args.agent_id, args.base_url, args.display_name)
 
     if args.json:
         print(json.dumps(result, indent=2, sort_keys=True))
@@ -298,6 +308,122 @@ def handle_activate(args: argparse.Namespace) -> None:
             ("Badge URL", result["badge_url"]),
         ]
     )
+
+
+def utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def timestamp_for_id() -> str:
+    return datetime.now().strftime("%Y%m%d-%H%M%S")
+
+
+def make_speedrun_agent_id(origin: str) -> str:
+    return f"agent:{origin}-{timestamp_for_id()}-{secrets.token_hex(3)}"
+
+
+def fallback_explorer_url(base_url: str, agent_id: str) -> str:
+    return f"{base_url.rstrip('/')}/agents/{quote(agent_id, safe='')}"
+
+
+def fallback_badge_url(base_url: str, agent_id: str) -> str:
+    return f"{base_url.rstrip('/')}/badges/{quote(agent_id, safe='')}.svg"
+
+
+def write_speedrun_report(report: dict[str, Any], report_stamp: str) -> Path:
+    report_dir = Path("reports") / "speedrun"
+    report_dir.mkdir(parents=True, exist_ok=True)
+    report_path = report_dir / f"defaultsettle-speedrun-{report_stamp}.json"
+    with report_path.open("w", encoding="utf-8") as report_file:
+        json.dump(report, report_file, indent=2, sort_keys=True)
+        report_file.write("\n")
+    return report_path
+
+
+def handle_speedrun(args: argparse.Namespace) -> int:
+    origin = args.origin
+    agent_id = args.agent_id or make_speedrun_agent_id(origin)
+    base_url = args.base_url.rstrip("/")
+    report_stamp = timestamp_for_id()
+    started_at = utc_now_iso()
+    started_timer = time.perf_counter()
+    report: dict[str, Any] = {
+        "started_at": started_at,
+        "completed_at": None,
+        "time_to_verified_receipt_seconds": None,
+        "origin": origin,
+        "agent_id": agent_id,
+        "base_url": base_url,
+        "success": False,
+        "explorer_url": None,
+        "badge_url": None,
+        "sar_receipt_id": None,
+        "continuity_receipt_id": None,
+        "chain_id": None,
+        "activation_stage": None,
+        "error": None,
+    }
+
+    try:
+        result = activate_agent(agent_id, base_url, f"Default Settlement Speedrun {report_stamp}")
+        elapsed = round(time.perf_counter() - started_timer, 3)
+        explorer_url = result["explorer_url"] or fallback_explorer_url(base_url, agent_id)
+        badge_url = result["badge_url"] or fallback_badge_url(base_url, agent_id)
+        report.update(
+            {
+                "completed_at": utc_now_iso(),
+                "time_to_verified_receipt_seconds": elapsed,
+                "success": True,
+                "explorer_url": explorer_url,
+                "badge_url": badge_url,
+                "sar_receipt_id": result["sar_receipt_id"],
+                "continuity_receipt_id": result["continuity_receipt_id"],
+                "chain_id": result["chain_id"],
+                "activation_stage": result["activation_stage"],
+            }
+        )
+        write_speedrun_report(report, report_stamp)
+    except RuntimeError as exc:
+        report.update(
+            {
+                "completed_at": utc_now_iso(),
+                "time_to_verified_receipt_seconds": round(time.perf_counter() - started_timer, 3),
+                "error": str(exc),
+            }
+        )
+        write_speedrun_report(report, report_stamp)
+        if args.json:
+            print(json.dumps(report, indent=2, sort_keys=True))
+        else:
+            print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    if args.json:
+        print(json.dumps(report, indent=2, sort_keys=True))
+        return 0
+
+    print("\u2713 Created demo agent")
+    print("\u2713 Generated activation receipt")
+    print("\u2713 Initialized continuity")
+    print("\u2713 Created evidence chain")
+    print("\u2713 Explorer/Profile URL ready")
+    print("\u2713 Badge URL ready")
+    print()
+    print_summary(
+        [
+            ("Agent ID", report["agent_id"]),
+            ("Activation Stage", report["activation_stage"]),
+            ("SAR Receipt ID", report["sar_receipt_id"]),
+            ("Continuity Receipt ID", report["continuity_receipt_id"]),
+            ("Chain ID", report["chain_id"]),
+            ("Explorer/Profile URL", report["explorer_url"]),
+            ("Badge URL", report["badge_url"]),
+            ("Time To Verified Receipt seconds", report["time_to_verified_receipt_seconds"]),
+        ]
+    )
+    print()
+    print("Some things you can't put a price on. Trust is one of them.")
+    return 0
 
 
 def load_receipt(path: Path) -> dict[str, Any]:
@@ -494,6 +620,21 @@ def build_parser() -> argparse.ArgumentParser:
         description="Default Settlement machine trust infrastructure CLI.",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
+
+    speedrun_parser = subparsers.add_parser("speedrun")
+    speedrun_parser.add_argument(
+        "--origin",
+        default="cli-speedrun",
+        help="Origin marker for generated demo agent IDs. Defaults to cli-speedrun.",
+    )
+    speedrun_parser.add_argument("--agent-id", help="Use a custom demo agent ID.")
+    speedrun_parser.add_argument(
+        "--base-url",
+        default=DEFAULT_BASE_URL,
+        help=f"Default Settlement API base URL. Defaults to {DEFAULT_BASE_URL}.",
+    )
+    speedrun_parser.add_argument("--json", action="store_true", help="Print speedrun report as JSON.")
+    speedrun_parser.set_defaults(func=handle_speedrun)
 
     activate_parser = subparsers.add_parser("activate")
     activate_parser.add_argument("agent_id")
