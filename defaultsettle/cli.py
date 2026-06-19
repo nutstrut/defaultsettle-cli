@@ -271,12 +271,28 @@ def activate_agent(
     fields["badge_url"] = absolute_url(base_url, fields["badge_url"])
     return {
         **fields,
+        "sar_receipt": extract_sar_receipt(activation_response),
         "register_status": register_status,
         "activation_status": activation_status,
         "register_response": register_response,
         "activation_response": activation_response,
         "summary": summary,
     }
+
+
+def extract_sar_receipt(activation_response: Any) -> dict[str, Any] | None:
+    """Return the verifiable SAR receipt (v0.1) from an activation response.
+
+    The receipt is the flat object that ``defaultsettle verify`` consumes; it is
+    absent when the agent was already activated and the server returns a stub.
+    """
+    if isinstance(activation_response, dict):
+        sar = activation_response.get("sar")
+        if isinstance(sar, dict):
+            receipt = sar.get("receipt_v0_1")
+            if isinstance(receipt, dict):
+                return receipt
+    return None
 
 
 def handle_activate(args: argparse.Namespace) -> None:
@@ -287,7 +303,7 @@ def handle_activate(args: argparse.Namespace) -> None:
         return
 
     registered_label = "Agent registered"
-    if register_status == "already_exists":
+    if result["register_status"] == "already_exists":
         registered_label = "Agent registered (already existed)"
     print(f"\u2713 {registered_label}")
     print("\u2713 Activation receipt generated")
@@ -340,6 +356,16 @@ def write_speedrun_report(report: dict[str, Any], report_stamp: str) -> Path:
     return report_path
 
 
+def write_speedrun_receipt(receipt: dict[str, Any], report_stamp: str) -> Path:
+    report_dir = Path("reports") / "speedrun"
+    report_dir.mkdir(parents=True, exist_ok=True)
+    receipt_path = report_dir / f"defaultsettle-receipt-{report_stamp}.json"
+    with receipt_path.open("w", encoding="utf-8") as receipt_file:
+        json.dump(receipt, receipt_file, indent=2, sort_keys=True)
+        receipt_file.write("\n")
+    return receipt_path
+
+
 def handle_speedrun(args: argparse.Namespace) -> int:
     origin = args.origin
     agent_id = args.agent_id or make_speedrun_agent_id(origin)
@@ -358,6 +384,7 @@ def handle_speedrun(args: argparse.Namespace) -> int:
         "explorer_url": None,
         "badge_url": None,
         "sar_receipt_id": None,
+        "sar_receipt_path": None,
         "continuity_receipt_id": None,
         "chain_id": None,
         "activation_stage": None,
@@ -369,6 +396,10 @@ def handle_speedrun(args: argparse.Namespace) -> int:
         elapsed = round(time.perf_counter() - started_timer, 3)
         explorer_url = result["explorer_url"] or fallback_explorer_url(base_url, agent_id)
         badge_url = result["badge_url"] or fallback_badge_url(base_url, agent_id)
+        sar_receipt = result.get("sar_receipt")
+        receipt_path = (
+            write_speedrun_receipt(sar_receipt, report_stamp) if sar_receipt else None
+        )
         report.update(
             {
                 "completed_at": utc_now_iso(),
@@ -377,6 +408,7 @@ def handle_speedrun(args: argparse.Namespace) -> int:
                 "explorer_url": explorer_url,
                 "badge_url": badge_url,
                 "sar_receipt_id": result["sar_receipt_id"],
+                "sar_receipt_path": str(receipt_path) if receipt_path else None,
                 "continuity_receipt_id": result["continuity_receipt_id"],
                 "chain_id": result["chain_id"],
                 "activation_stage": result["activation_stage"],
@@ -418,9 +450,14 @@ def handle_speedrun(args: argparse.Namespace) -> int:
             ("Chain ID", report["chain_id"]),
             ("Explorer/Profile URL", report["explorer_url"]),
             ("Badge URL", report["badge_url"]),
+            ("Saved Receipt", report["sar_receipt_path"]),
             ("Time To Verified Receipt seconds", report["time_to_verified_receipt_seconds"]),
         ]
     )
+    if report["sar_receipt_path"]:
+        print()
+        print("Verify the saved receipt locally:")
+        print(f"  defaultsettle verify {report['sar_receipt_path']}")
     print()
     print("Some things you can't put a price on. Trust is one of them.")
     return 0
@@ -449,13 +486,36 @@ def load_receipt(path: Path) -> dict[str, Any]:
     return data
 
 
+def canonicalize_json_value(value: Any) -> Any:
+    """Apply JCS (RFC 8785) number canonicalization.
+
+    The verifier serializes integral floats without a fractional part (``1.0``
+    becomes ``1``). Plain ``json.dumps`` would emit ``1.0`` and produce a
+    different digest, so real receipts must be canonicalized the same way the
+    server does before hashing.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    if isinstance(value, dict):
+        return {key: canonicalize_json_value(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [canonicalize_json_value(item) for item in value]
+    return value
+
+
 def compute_receipt_id(receipt: dict[str, Any]) -> str:
     canonical_fields = {
         key: value
         for key, value in receipt.items()
         if key not in {"receipt_id", "sig"}
     }
-    canonical_json = json.dumps(canonical_fields, sort_keys=True, separators=(",", ":"))
+    canonical_json = json.dumps(
+        canonicalize_json_value(canonical_fields),
+        sort_keys=True,
+        separators=(",", ":"),
+    )
     digest = hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()
     return f"sha256:{digest}"
 
@@ -625,20 +685,22 @@ def build_parser() -> argparse.ArgumentParser:
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    speedrun_parser = subparsers.add_parser("speedrun")
-    speedrun_parser.add_argument(
-        "--origin",
-        default="cli-speedrun",
-        help="Origin marker for generated demo agent IDs. Defaults to cli-speedrun.",
-    )
-    speedrun_parser.add_argument("--agent-id", help="Use a custom demo agent ID.")
-    speedrun_parser.add_argument(
-        "--base-url",
-        default=DEFAULT_BASE_URL,
-        help=f"Default Settlement API base URL. Defaults to {DEFAULT_BASE_URL}.",
-    )
-    speedrun_parser.add_argument("--json", action="store_true", help="Print speedrun report as JSON.")
-    speedrun_parser.set_defaults(func=handle_speedrun)
+    # "demo" is a friendlier alias for "speedrun"; both run the same handler.
+    for speedrun_name in ("speedrun", "demo"):
+        speedrun_parser = subparsers.add_parser(speedrun_name)
+        speedrun_parser.add_argument(
+            "--origin",
+            default="cli-speedrun",
+            help="Origin marker for generated demo agent IDs. Defaults to cli-speedrun.",
+        )
+        speedrun_parser.add_argument("--agent-id", help="Use a custom demo agent ID.")
+        speedrun_parser.add_argument(
+            "--base-url",
+            default=DEFAULT_BASE_URL,
+            help=f"Default Settlement API base URL. Defaults to {DEFAULT_BASE_URL}.",
+        )
+        speedrun_parser.add_argument("--json", action="store_true", help="Print speedrun report as JSON.")
+        speedrun_parser.set_defaults(func=handle_speedrun)
 
     activate_parser = subparsers.add_parser("activate")
     activate_parser.add_argument("agent_id")

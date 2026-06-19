@@ -1,2 +1,10 @@
 __pycache__/
 *.pyc
+*.egg-info/
+build/
+dist/
+
+# Generated speedrun artifacts (a sample report is committed for reference).
+/reports/speedrun/defaultsettle-receipt-*.json
+/reports/speedrun/defaultsettle-speedrun-*.json
+!/reports/speedrun/defaultsettle-speedrun-20260608-160425.json

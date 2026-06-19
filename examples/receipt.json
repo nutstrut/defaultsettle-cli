@@ -1,11 +1,11 @@
 {
-  "task_id_hash": "sha256:cb1e087ca1ccbb850eb5edb037cf3bc941b5856d73068f61fbeed6b4a007b5fa",
-  "verdict": "PASS",
   "confidence": 1.0,
+  "counterparty": "agent:example-receipt-20260619-191356-8d2ea0",
   "reason_code": "SPEC_MATCH",
-  "ts": "2026-06-01T05:24:03.901412Z",
-  "verifier_kid": "sar-prod-ed25519-03",
-  "counterparty": "wallet:start-page:agent-start-loop-test-008",
-  "receipt_id": "sha256:537be8dab6bb424e6cb8e6a63572cc5bc0651cc35d3468cda14629fd51fd4f0e",
-  "sig": "base64url:TJiGDEnMjABMTVInvJogqtQYxwZbt6_9DDnT-KlfRBSlFElnQnnVaqPhhmytURyE7M68W0xNZxyUsTrZ9Vx1Dg"
+  "receipt_id": "sha256:e9857827b332d951f77c65d00fd736127bb198bae1e8c003cd7a58538935216f",
+  "sig": "base64url:r49r9M7yi6ttqWfp0oofS34V3Dwpcr4_iQELixoYRev37SNGXu8firHUCZDqAravP6QY4tw9GCR1_R9CPhn2Dg",
+  "task_id_hash": "sha256:d2fa9784a90850f20f593180efc719401f24dc23f33e1eee283e8533ccd9a7b4",
+  "ts": "2026-06-19T19:13:56.402912Z",
+  "verdict": "PASS",
+  "verifier_kid": "sar-prod-ed25519-03"
 }

@@ -1,118 +1,194 @@
 # Default Settlement CLI
 
-Default Settlement is machine trust infrastructure for autonomous systems.
+**Run one command. Get a signed receipt proving an AI agent completed a task. Verify it locally.**
 
-## Speedrun: zero to first proof
+No account. No API key. No OAuth. No environment variables. One command, one live signed receipt, in a few seconds.
 
-Default Settlement Speedrun is the fastest path from a fresh checkout to a
-verified demo activation proof. It requires no account, API key, OAuth flow, or
-environment variables.
+## Quickstart
 
 ```bash
-python -m defaultsettle.cli speedrun
+python3 -m pip install -e .
+defaultsettle speedrun
 ```
 
-Target: under 60 seconds.
+That's it. `speedrun` (alias: `defaultsettle demo`) creates a fresh demo agent, runs it
+through the public Default Settlement endpoints, and prints a verified result:
 
-The command creates a unique demo agent ID, registers and activates it through
-the public activation endpoints, fetches the profile summary, prints receipt and
-Explorer links, and writes a local report to `reports/speedrun/`.
+```text
+✓ Created demo agent
+✓ Generated activation receipt
+✓ Initialized continuity
+✓ Created evidence chain
+✓ Explorer/Profile URL ready
+✓ Badge URL ready
 
-This repository contains the v0.1 scaffold for the developer command-line entry
-point. The CLI will allow developers to activate agents, verify evidence,
-inspect chains, and retrieve public trust profiles.
+Agent ID                          agent:cli-speedrun-20260619-191518-29ee58
+Activation Stage                  chained
+SAR Receipt ID                    a54bcd18d8d5dabc94b307dcfcc87c4297e24b845cd2ea730459bd0c5a06ccdf
+Continuity Receipt ID             sha256:146c4d6b...27b4f6
+Chain ID                          sha256:3f53ee66...96fdc47
+Explorer/Profile URL              https://defaultverifier.com/trustscore/agent:cli-speedrun-...
+Badge URL                         https://defaultverifier.com/badge/agent:cli-speedrun-....svg
+Saved Receipt                     reports/speedrun/defaultsettle-receipt-20260619-191518.json
+Time To Verified Receipt seconds  3.376
 
-## Lifecycle
+Verify the saved receipt locally:
+  defaultsettle verify reports/speedrun/defaultsettle-receipt-20260619-191518.json
+```
 
-Agent Activation
--> SAR Verification
--> Continuity Verification
--> Chained Evidence
--> Explorer Agent Profile
--> Badge Verification
--> Public Trust Report
+(IDs, URLs and timing are unique per run — yours will differ.)
+
+### What just happened
+
+In one command you produced a **signed, verifiable receipt** that a machine agent
+completed a task. The run:
+
+- created a unique demo agent and activated it,
+- got back a signed receipt (the `SAR Receipt`) plus a continuity receipt and an
+  evidence chain linking them,
+- gave you a public **Explorer/Profile URL** and a **Badge URL** anyone can open,
+- saved the receipt to `reports/speedrun/` so you can verify it yourself.
+
+### Verify it yourself
+
+The run prints the exact command. Verification reads the saved receipt and runs a
+**local integrity check** — no network needed:
+
+```bash
+defaultsettle verify reports/speedrun/defaultsettle-receipt-<timestamp>.json
+```
+
+```text
+Receipt ID           sha256:dcf8f27a...3361b42
+Computed Receipt ID  sha256:dcf8f27a...3361b42
+Verdict              PASS
+Reason Code          SPEC_MATCH
+Integrity            PASS
+```
+
+`verify` recomputes the receipt's canonical hash and checks it against the
+`receipt_id` baked into the receipt. If a single field were altered, the hashes
+diverge and `Integrity` reads `FAIL`. This proves the receipt **has not been
+tampered with** since it was issued.
+
+> Scope note: `verify` checks receipt integrity offline today. Verifying the
+> issuer's Ed25519 **signature** against the verifier's public key (full offline
+> authenticity) is on the roadmap — the command prints
+> `Signature verification coming soon` so the current guarantee is never
+> overstated.
+
+## Why receipts matter
+
+When autonomous agents act on your behalf, "trust me, it worked" doesn't scale.
+A receipt turns a claim into evidence: a portable, hash-addressed record of what
+an agent did and how it was judged, that a counterparty can check without calling
+you and without trusting your word. Default Settlement issues those receipts and
+keeps a public trust profile per agent.
 
 ## Commands
 
-### `defaultsettle speedrun`
+### `defaultsettle speedrun` (alias `demo`)
 
-Purpose: Create demo activation proof as quickly as possible.
-
-Example:
+Fastest path from a fresh checkout to a verified demo proof.
 
 ```bash
 defaultsettle speedrun
-defaultsettle speedrun --json
-defaultsettle speedrun --origin cli-speedrun --base-url https://defaultverifier.com
+defaultsettle demo --json
+defaultsettle speedrun --base-url https://defaultverifier.com
 ```
 
-Safety: this command only creates demo activation proof. It does not post, does
-not use OAuth, and does not mutate anything except registering and activating
-the demo agent through public activation endpoints.
-
-### `defaultsettle activate`
-
-Purpose: Register and natively activate an autonomous agent.
-
-Example:
-
-```bash
-defaultsettle activate agent:example-001
-defaultsettle activate agent:example-001 --display-name "Example Agent"
-defaultsettle activate agent:example-001 --base-url https://defaultverifier.com
-defaultsettle activate agent:example-001 --json
-```
-
-Human output includes:
-
-- agent registration
-- activation receipt generation
-- continuity initialization
-- evidence chain creation
-- agent profile availability
-- badge availability
-
-The command prints Agent ID, activation stage and type, SAR and Continuity
-receipt IDs when returned, chain ID when returned, and Explorer/profile and
-badge URLs when returned.
+Safe by design: it only creates a **demo** activation proof through public
+endpoints. It does not post anything externally, does not move money or sign a
+wallet transaction, does not use OAuth, and needs no local services. It writes a
+report and the receipt to `reports/speedrun/`.
 
 ### `defaultsettle verify`
 
-Purpose: Verify SAR receipts.
-
-Example:
+Verify a saved SAR receipt's integrity locally (offline).
 
 ```bash
-defaultsettle verify examples/receipt.json
+defaultsettle verify reports/speedrun/defaultsettle-receipt-<timestamp>.json
 defaultsettle verify examples/receipt.json --json
 ```
 
-### `defaultsettle chain`
+### `defaultsettle activate`
 
-Purpose: Inspect linked SAR + Continuity evidence.
-
-Example:
+Register and natively activate a real agent of your own.
 
 ```bash
-defaultsettle chain sha256:8b1aafe5dc4f1273220f1d6e634e7787e1c75df55e95dbe1cc6cd689182af688
-defaultsettle chain <chain_id> --json
+defaultsettle activate agent:example-001 --display-name "Example Agent"
+defaultsettle activate agent:example-001 --json
 ```
 
 ### `defaultsettle profile`
 
-Purpose: Retrieve Agent Profile / Public Trust Report.
-
-Example:
+Retrieve an agent's public trust profile.
 
 ```bash
-defaultsettle profile agent:start-loop-test-008
-defaultsettle profile agent:start-loop-test-008 --json
+defaultsettle profile agent:example-001
+defaultsettle profile agent:example-001 --json
 ```
+
+### `defaultsettle chain`
+
+Inspect a linked evidence chain by its chain ID.
+
+```bash
+defaultsettle chain sha256:<chain_id>
+defaultsettle chain sha256:<chain_id> --json
+```
+
+## Security & trust model
+
+- **Speedrun is read-mostly and safe.** It registers and activates a throwaway
+  demo agent through public endpoints. No account, key, OAuth, or env var is
+  required, and nothing is posted to third parties.
+- **Not a payment or wallet action.** Nothing in this CLI moves funds or signs a
+  blockchain transaction.
+- **Receipts are content-addressed.** A receipt's `receipt_id` is a SHA-256 over
+  its canonical contents, so any change to the receipt body is detectable.
+- **Offline integrity, today.** `verify` recomputes that hash locally with no
+  network call. Issuer signature verification is coming; the tool says so
+  explicitly rather than implying more than it checks.
+- **Default endpoint** is `https://defaultverifier.com`; override with
+  `--base-url` for a different environment.
 
 ## Development
 
-Run the CLI module directly:
+Run from source without installing:
 
 ```bash
-python -m defaultsettle.cli activate agent:example-001
+python3 -m defaultsettle.cli --help
+python3 -m defaultsettle.cli speedrun
 ```
+
+Run the local test suite (no network required):
+
+```bash
+python3 -m unittest discover -s tests
+```
+
+## Links
+
+- Verifier & public Explorer: https://defaultverifier.com
+- An agent's trust profile: `https://defaultverifier.com/trustscore/<agent_id>`
+- An agent's badge: `https://defaultverifier.com/badge/<agent_id>.svg`
+
+---
+
+### Repo metadata (for maintainers)
+
+Suggested GitHub description:
+
+> CLI for generating signed receipts for AI-agent actions in seconds.
+
+Suggested topics:
+
+`ai-agents` · `verification` · `receipts` · `trust` · `cli` ·
+`default-settlement` · `agent-infrastructure` · `provenance`
+
+Launch one-liner to share:
+
+> Run one command, get a live signed receipt that an AI agent completed a task,
+> and verify it locally — no account, no API key, no setup.
+> `pip install -e . && defaultsettle speedrun`
