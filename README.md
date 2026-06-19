@@ -184,8 +184,16 @@ Suggested GitHub description:
 
 Suggested topics:
 
-`ai-agents` · `verification` · `receipts` · `trust` · `cli` ·
-`default-settlement` · `agent-infrastructure` · `provenance`
+```
+ai-agents
+verification
+receipts
+trust
+cli
+default-settlement
+agent-infrastructure
+provenance
+```
 
 Launch one-liner to share:
 
