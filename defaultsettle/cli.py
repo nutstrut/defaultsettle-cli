@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -19,17 +21,31 @@ from urllib.request import Request, urlopen
 API_BASE_URL = "https://defaultverifier.com/v1"
 DEFAULT_BASE_URL = "https://defaultverifier.com"
 REQUEST_TIMEOUT_SECONDS = 20
+
+# Fields required to recompute and check receipt integrity. ``verifier_kid``,
+# ``counterparty``, and ``sig`` are intentionally excluded: a signed
+# SettlementWitness receipt carries them, but SAR-402 recorded receipts do not,
+# and integrity must still be checkable for both shapes.
 SAR_RECEIPT_REQUIRED_FIELDS = (
     "task_id_hash",
     "verdict",
     "confidence",
     "reason_code",
     "ts",
-    "verifier_kid",
-    "counterparty",
     "receipt_id",
-    "sig",
 )
+
+# Trusted DefaultVerifier signing keys, keyed by ``verifier_kid``. Only keys
+# published here are accepted; key material embedded in a receipt is never
+# trusted. Each value is the raw 32-byte Ed25519 public key, base64url-encoded
+# (the JWK ``x`` parameter for an OKP/Ed25519 key).
+TRUSTED_VERIFIER_KEYS = {
+    "sar-prod-ed25519-03": "2a_BEldn8DHwfU-Gi3QmYbIZ6TB0mBn6HrXTA6BHAgI",
+}
+
+SIGNATURE_PASS = "PASS"
+SIGNATURE_FAIL = "FAIL"
+SIGNATURE_NOT_APPLICABLE = "not_applicable"
 
 
 class ApiError(RuntimeError):
@@ -520,7 +536,105 @@ def compute_receipt_id(receipt: dict[str, Any]) -> str:
     return f"sha256:{digest}"
 
 
+def decode_base64url(value: str) -> bytes:
+    """Decode base64url text, tolerating missing ``=`` padding."""
+    padded = value + "=" * (-len(value) % 4)
+    return base64.urlsafe_b64decode(padded.encode("ascii"))
+
+
+def parse_signature(sig: Any) -> bytes:
+    """Parse a receipt ``sig`` value into raw signature bytes.
+
+    Accepts the canonical ``base64url:<signature>`` form and, defensively, a
+    bare base64url string. Raises ``ValueError`` for anything malformed.
+    """
+    if not isinstance(sig, str) or not sig:
+        raise ValueError("signature is missing or not a string")
+    encoded = sig[len("base64url:") :] if sig.startswith("base64url:") else sig
+    encoded = encoded.strip()
+    if not encoded:
+        raise ValueError("signature payload is empty")
+    try:
+        raw = decode_base64url(encoded)
+    except (binascii.Error, ValueError) as exc:
+        raise ValueError(f"signature is not valid base64url: {exc}") from exc
+    if len(raw) != 64:
+        raise ValueError(f"Ed25519 signature must be 64 bytes, got {len(raw)}")
+    return raw
+
+
+def is_signed_settlement_witness(receipt: dict[str, Any]) -> bool:
+    """Whether a receipt is a signed SettlementWitness / DefaultVerifier receipt.
+
+    Signed receipts are authenticated by a verifier and carry a ``verifier_kid``.
+    SAR-402 recorded receipts are not signed by a verifier; they have no
+    ``verifier_kid`` and (per requirement) must not imply signature/proof-seal
+    verification.
+    """
+    return bool(receipt.get("verifier_kid"))
+
+
+def authenticate_signature(receipt: dict[str, Any], digest: bytes) -> tuple[str, str]:
+    """Authenticate the Ed25519 signature over the receipt digest bytes.
+
+    Returns ``(status, detail)`` where status is one of ``PASS``/``FAIL``/
+    ``not_applicable``. The trusted public key is resolved solely by
+    ``verifier_kid`` against :data:`TRUSTED_VERIFIER_KEYS`; key material embedded
+    in the receipt is never used.
+    """
+    if not is_signed_settlement_witness(receipt):
+        return SIGNATURE_NOT_APPLICABLE, "Not a signed SettlementWitness receipt"
+
+    kid = receipt["verifier_kid"]
+    trusted_key_b64 = TRUSTED_VERIFIER_KEYS.get(kid)
+    if trusted_key_b64 is None:
+        return SIGNATURE_FAIL, f"Unknown verifier_kid: {kid}"
+
+    try:
+        signature = parse_signature(receipt.get("sig"))
+    except ValueError as exc:
+        return SIGNATURE_FAIL, str(exc)
+
+    # Imported lazily so the rest of the CLI runs without the crypto dependency.
+    from cryptography.exceptions import InvalidSignature
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+
+    public_key = Ed25519PublicKey.from_public_bytes(decode_base64url(trusted_key_b64))
+    try:
+        public_key.verify(signature, digest)
+    except InvalidSignature:
+        return SIGNATURE_FAIL, "Signature does not match trusted verifier key"
+    return SIGNATURE_PASS, f"Verified against trusted key {kid}"
+
+
+def is_sar_402_recorded(receipt: dict[str, Any]) -> bool:
+    """Whether a receipt is a recorded SAR-402 settlement receipt.
+
+    These are recorded (not signed) receipts and carry no SettlementWitness
+    Ed25519 signature, so neither integrity nor signature authentication applies.
+    """
+    if receipt.get("receipt_type") == "sar_402_settlement":
+        return True
+    inner = receipt.get("receipt")
+    if isinstance(inner, dict) and inner.get("profile") == "sar-402":
+        return True
+    return False
+
+
 def verify_sar_receipt(receipt: dict[str, Any]) -> dict[str, Any]:
+    if is_sar_402_recorded(receipt):
+        return {
+            "receipt_type": "sar_402_settlement",
+            "receipt_id": receipt.get("receipt_id"),
+            "integrity": SIGNATURE_NOT_APPLICABLE,
+            "signature_authentication": SIGNATURE_NOT_APPLICABLE,
+            "signature_verification": SIGNATURE_NOT_APPLICABLE,
+            "status": SIGNATURE_NOT_APPLICABLE,
+            "message": (
+                "recorded SAR-402 receipt; no SettlementWitness Ed25519 signature"
+            ),
+        }
+
     missing_fields = [
         field
         for field in SAR_RECEIPT_REQUIRED_FIELDS
@@ -531,6 +645,12 @@ def verify_sar_receipt(receipt: dict[str, Any]) -> dict[str, Any]:
 
     computed_receipt_id = compute_receipt_id(receipt)
     integrity = "PASS" if computed_receipt_id == receipt["receipt_id"] else "FAIL"
+
+    # Authenticate against the recomputed digest (the same bytes that back the
+    # receipt_id), independent of whether integrity passed.
+    digest = bytes.fromhex(computed_receipt_id.split(":", 1)[1])
+    signature_status, signature_detail = authenticate_signature(receipt, digest)
+
     return {
         "receipt_id": receipt["receipt_id"],
         "computed_receipt_id": computed_receipt_id,
@@ -538,8 +658,9 @@ def verify_sar_receipt(receipt: dict[str, Any]) -> dict[str, Any]:
         "verdict": receipt["verdict"],
         "reason_code": receipt["reason_code"],
         "timestamp": receipt["ts"],
-        "verifier_kid": receipt["verifier_kid"],
-        "signature_verification": "not_implemented",
+        "verifier_kid": receipt.get("verifier_kid"),
+        "signature_authentication": signature_status,
+        "signature_detail": signature_detail,
     }
 
 
@@ -549,6 +670,18 @@ def handle_verify(args: argparse.Namespace) -> int:
 
     if args.json:
         print(json.dumps(result, indent=2, sort_keys=True))
+    elif result.get("receipt_type") == "sar_402_settlement":
+        print_summary(
+            [
+                ("Receipt ID", result["receipt_id"]),
+                ("Receipt Type", "sar_402_settlement"),
+                ("Integrity", result["integrity"]),
+                ("Signature Authentication", result["signature_authentication"]),
+            ]
+        )
+        print()
+        print(result["message"])
+        return 0
     else:
         print_summary(
             [
@@ -559,12 +692,18 @@ def handle_verify(args: argparse.Namespace) -> int:
                 ("Timestamp", result["timestamp"]),
                 ("Verifier Key ID", result["verifier_kid"]),
                 ("Integrity", result["integrity"]),
+                ("Signature Authentication", result["signature_authentication"]),
             ]
         )
         print()
-        print("Signature verification coming soon; local integrity check only.")
+        print(result["signature_detail"])
 
-    return 0 if result["integrity"] == "PASS" else 1
+    if result.get("receipt_type") == "sar_402_settlement":
+        return 0
+
+    integrity_ok = result["integrity"] == "PASS"
+    signature_ok = result["signature_authentication"] != SIGNATURE_FAIL
+    return 0 if integrity_ok and signature_ok else 1
 
 
 def handle_profile(args: argparse.Namespace) -> None:

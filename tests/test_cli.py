@@ -68,6 +68,95 @@ class VerifyTests(unittest.TestCase):
         self.assertEqual(cli.verify_sar_receipt(receipt)["integrity"], "FAIL")
 
 
+class SignatureAuthenticationTests(unittest.TestCase):
+    def test_signed_receipt_passes_integrity_and_signature(self) -> None:
+        receipt = cli.load_receipt(EXAMPLE_RECEIPT)
+        result = cli.verify_sar_receipt(receipt)
+        self.assertEqual(result["integrity"], "PASS")
+        self.assertEqual(result["signature_authentication"], cli.SIGNATURE_PASS)
+
+    def test_fake_verifier_kid_fails_signature(self) -> None:
+        receipt = dict(cli.load_receipt(EXAMPLE_RECEIPT))
+        receipt["verifier_kid"] = "sar-prod-ed25519-99"
+        # receipt_id is recomputed from the body, so integrity stays consistent
+        # with the tampered kid; only signature authentication should fail.
+        receipt["receipt_id"] = cli.compute_receipt_id(receipt)
+        result = cli.verify_sar_receipt(receipt)
+        self.assertEqual(result["integrity"], "PASS")
+        self.assertEqual(result["signature_authentication"], cli.SIGNATURE_FAIL)
+
+    def test_fabricated_receipt_cannot_authenticate(self) -> None:
+        # A fully fabricated receipt with a made-up kid: integrity can be made to
+        # pass by recomputing the id, but signature authentication must fail.
+        receipt = {
+            "task_id_hash": "sha256:" + "ab" * 32,
+            "verdict": "PASS",
+            "confidence": 1.0,
+            "reason_code": "SPEC_MATCH",
+            "ts": "2026-06-20T00:00:00.000000Z",
+            "verifier_kid": "totally-made-up-kid",
+            "sig": "base64url:" + "A" * 86,
+        }
+        receipt["receipt_id"] = cli.compute_receipt_id(receipt)
+        result = cli.verify_sar_receipt(receipt)
+        self.assertEqual(result["signature_authentication"], cli.SIGNATURE_FAIL)
+
+    def test_invalid_signature_fails(self) -> None:
+        receipt = dict(cli.load_receipt(EXAMPLE_RECEIPT))
+        # Flip the signature to a valid-length but wrong value.
+        receipt["sig"] = "base64url:" + "B" * 86
+        result = cli.verify_sar_receipt(receipt)
+        self.assertEqual(result["integrity"], "PASS")
+        self.assertEqual(result["signature_authentication"], cli.SIGNATURE_FAIL)
+
+    def test_missing_signature_fails_for_signed_receipt(self) -> None:
+        receipt = dict(cli.load_receipt(EXAMPLE_RECEIPT))
+        del receipt["sig"]
+        result = cli.verify_sar_receipt(receipt)
+        self.assertEqual(result["signature_authentication"], cli.SIGNATURE_FAIL)
+
+    def test_sar_402_recorded_receipt_is_not_applicable(self) -> None:
+        # A SAR-402 recorded receipt is not a signed SettlementWitness receipt:
+        # no verifier_kid, no signature. Integrity is still checkable.
+        receipt = {
+            "task_id_hash": "sha256:" + "cd" * 32,
+            "verdict": "RECORDED",
+            "confidence": 1.0,
+            "reason_code": "SAR-402",
+            "ts": "2026-06-20T00:00:00.000000Z",
+        }
+        receipt["receipt_id"] = cli.compute_receipt_id(receipt)
+        result = cli.verify_sar_receipt(receipt)
+        self.assertEqual(result["integrity"], "PASS")
+        self.assertEqual(
+            result["signature_authentication"], cli.SIGNATURE_NOT_APPLICABLE
+        )
+
+    def test_sar_402_wrapper_receipt_is_not_applicable(self) -> None:
+        receipt = {
+            "receipt_id": "sha256:example",
+            "receipt_type": "sar_402_settlement",
+            "receipt": {
+                "profile": "sar-402",
+                "sar_type": "Settlement Attestation Receipt",
+                "verification_mode": "record",
+            },
+        }
+        result = cli.verify_sar_receipt(receipt)
+        self.assertEqual(result["receipt_type"], "sar_402_settlement")
+        self.assertEqual(result["receipt_id"], "sha256:example")
+        self.assertEqual(result["integrity"], cli.SIGNATURE_NOT_APPLICABLE)
+        self.assertEqual(
+            result["signature_authentication"], cli.SIGNATURE_NOT_APPLICABLE
+        )
+
+    def test_parse_signature_accepts_prefixed_and_bare(self) -> None:
+        receipt = cli.load_receipt(EXAMPLE_RECEIPT)
+        prefixed = receipt["sig"]
+        bare = prefixed[len("base64url:") :]
+        self.assertEqual(cli.parse_signature(prefixed), cli.parse_signature(bare))
+
+
 class EntryPointTests(unittest.TestCase):
     def test_main_is_callable(self) -> None:
         self.assertTrue(callable(cli.main))

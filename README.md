@@ -51,31 +51,41 @@ completed a task. The run:
 
 ### Verify it yourself
 
-The run prints the exact command. Verification reads the saved receipt and runs a
-**local integrity check** — no network needed:
+The run prints the exact command. Verification reads the saved receipt and runs
+**fully offline** — no network needed:
 
 ```bash
 defaultsettle verify reports/speedrun/defaultsettle-receipt-<timestamp>.json
 ```
 
 ```text
-Receipt ID           sha256:dcf8f27a...3361b42
-Computed Receipt ID  sha256:dcf8f27a...3361b42
-Verdict              PASS
-Reason Code          SPEC_MATCH
-Integrity            PASS
+Receipt ID                sha256:dcf8f27a...3361b42
+Computed Receipt ID       sha256:dcf8f27a...3361b42
+Verdict                   PASS
+Reason Code               SPEC_MATCH
+Integrity                 PASS
+Signature Authentication  PASS
 ```
 
-`verify` recomputes the receipt's canonical hash and checks it against the
-`receipt_id` baked into the receipt. If a single field were altered, the hashes
-diverge and `Integrity` reads `FAIL`. This proves the receipt **has not been
-tampered with** since it was issued.
+`verify` performs two independent checks:
 
-> Scope note: `verify` checks receipt integrity offline today. Verifying the
-> issuer's Ed25519 **signature** against the verifier's public key (full offline
-> authenticity) is on the roadmap — the command prints
-> `Signature verification coming soon` so the current guarantee is never
-> overstated.
+1. **Integrity** — it recomputes the receipt's canonical hash and checks it
+   against the `receipt_id` baked into the receipt. If a single field were
+   altered, the hashes diverge and `Integrity` reads `FAIL`. This proves the
+   receipt **has not been tampered with** since it was issued.
+2. **Signature authentication** — for signed SettlementWitness / DefaultVerifier
+   receipts, it verifies the issuer's **Ed25519 signature** over the same digest
+   using the trusted public key resolved by `verifier_kid`. Key material embedded
+   in the receipt is never trusted. An unknown `verifier_kid`, or a
+   missing/malformed/invalid signature, reads `FAIL`. This proves the receipt was
+   **issued by the verifier it claims**, not just left untampered.
+
+`verify` exits non-zero if either integrity or signature authentication fails.
+
+> SAR-402 recorded receipts are not signed SettlementWitness receipts: they carry
+> no verifier signature, so `Signature Authentication` reads `not_applicable`
+> while integrity is still checked. The tool never implies a signature or
+> proof-seal was verified when one was not.
 
 ## Why receipts matter
 
@@ -104,7 +114,8 @@ report and the receipt to `reports/speedrun/`.
 
 ### `defaultsettle verify`
 
-Verify a saved SAR receipt's integrity locally (offline).
+Verify a saved SAR receipt locally (offline): receipt integrity plus Ed25519
+signature authentication for signed receipts.
 
 ```bash
 defaultsettle verify reports/speedrun/defaultsettle-receipt-<timestamp>.json
@@ -147,9 +158,12 @@ defaultsettle chain sha256:<chain_id> --json
   blockchain transaction.
 - **Receipts are content-addressed.** A receipt's `receipt_id` is a SHA-256 over
   its canonical contents, so any change to the receipt body is detectable.
-- **Offline integrity, today.** `verify` recomputes that hash locally with no
-  network call. Issuer signature verification is coming; the tool says so
-  explicitly rather than implying more than it checks.
+- **Offline integrity and authenticity.** `verify` recomputes that hash locally
+  with no network call, and for signed receipts it authenticates the issuer's
+  Ed25519 signature against a trusted, pinned verifier public key. SAR-402
+  recorded receipts have no signature, so the tool reports
+  `Signature Authentication: not_applicable` rather than implying more than it
+  checks.
 - **Default endpoint** is `https://defaultverifier.com`; override with
   `--base-url` for a different environment.
 
