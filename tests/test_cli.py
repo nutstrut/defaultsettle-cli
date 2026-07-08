@@ -14,6 +14,8 @@ from defaultsettle import cli
 
 EXAMPLE_RECEIPT = Path(__file__).resolve().parent.parent / "examples" / "receipt.json"
 FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
+SAR_402_CANONICAL = FIXTURES_DIR / "sar-402-canonical-demo.json"
+SAR_402_TAMPERED = FIXTURES_DIR / "sar-402-tampered.json"
 
 
 class ParserTests(unittest.TestCase):
@@ -133,7 +135,38 @@ class SignatureAuthenticationTests(unittest.TestCase):
             result["signature_authentication"], cli.SIGNATURE_NOT_APPLICABLE
         )
 
-    def test_sar_402_wrapper_receipt_is_not_applicable(self) -> None:
+    def test_sar_402_canonical_payload_detected_as_recorded_evidence(self) -> None:
+        receipt = cli.load_receipt(SAR_402_CANONICAL)
+        self.assertTrue(cli.is_sar_402_recorded(receipt))
+        result = cli.verify_sar_receipt(receipt)
+        self.assertEqual(result["artifact_type"], "sar_402_recorded_evidence")
+
+    def test_sar_402_canonical_payload_integrity_passes(self) -> None:
+        receipt = cli.load_receipt(SAR_402_CANONICAL)
+        result = cli.verify_sar_receipt(receipt)
+        self.assertEqual(result["integrity"], "PASS")
+        self.assertEqual(result["computed_digest"], result["declared_digest"])
+
+    def test_sar_402_tampered_payload_integrity_fails(self) -> None:
+        receipt = cli.load_receipt(SAR_402_TAMPERED)
+        result = cli.verify_sar_receipt(receipt)
+        self.assertEqual(result["integrity"], "FAIL")
+        self.assertNotEqual(result["computed_digest"], result["declared_digest"])
+
+    def test_sar_402_signature_authentication_is_not_applicable(self) -> None:
+        receipt = cli.load_receipt(SAR_402_CANONICAL)
+        result = cli.verify_sar_receipt(receipt)
+        self.assertEqual(
+            result["signature_authentication"], cli.SIGNATURE_NOT_APPLICABLE
+        )
+        tampered_result = cli.verify_sar_receipt(cli.load_receipt(SAR_402_TAMPERED))
+        self.assertEqual(
+            tampered_result["signature_authentication"], cli.SIGNATURE_NOT_APPLICABLE
+        )
+
+    def test_sar_402_old_synthetic_wrapper_shape_is_not_detected(self) -> None:
+        # The old receipt_type/nested-receipt wrapper never matched any real
+        # artifact; detection must key off the real top-level schema_id/profile.
         receipt = {
             "receipt_id": "sha256:example",
             "receipt_type": "sar_402_settlement",
@@ -143,13 +176,7 @@ class SignatureAuthenticationTests(unittest.TestCase):
                 "verification_mode": "record",
             },
         }
-        result = cli.verify_sar_receipt(receipt)
-        self.assertEqual(result["receipt_type"], "sar_402_settlement")
-        self.assertEqual(result["receipt_id"], "sha256:example")
-        self.assertEqual(result["integrity"], cli.SIGNATURE_NOT_APPLICABLE)
-        self.assertEqual(
-            result["signature_authentication"], cli.SIGNATURE_NOT_APPLICABLE
-        )
+        self.assertFalse(cli.is_sar_402_recorded(receipt))
 
     def test_parse_signature_accepts_prefixed_and_bare(self) -> None:
         receipt = cli.load_receipt(EXAMPLE_RECEIPT)

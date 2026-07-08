@@ -636,32 +636,81 @@ def authenticate_signature(receipt: dict[str, Any], digest: bytes) -> tuple[str,
 
 
 def is_sar_402_recorded(receipt: dict[str, Any]) -> bool:
-    """Whether a receipt is a recorded SAR-402 settlement receipt.
+    """Whether a receipt is SAR-402 recorded evidence.
 
-    These are recorded (not signed) receipts and carry no SettlementWitness
-    Ed25519 signature, so neither integrity nor signature authentication applies.
+    Real SAR-402 artifacts (the canonical public demo payload and its schema,
+    ``sar_402_settlement_v0.1``) carry ``schema_id``/``profile`` as top-level
+    fields and an ``integrity`` object with a digest — not a
+    ``receipt_type: sar_402_settlement`` wrapper with a nested ``receipt``
+    object (that shape does not correspond to any real artifact). These are
+    recorded, not signed: they carry no ``verifier_kid``/``sig``, so neither
+    SAR v0.1 signed-receipt verification nor signature authentication applies.
     """
-    if receipt.get("receipt_type") == "sar_402_settlement":
+    if receipt.get("schema_id") == "sar_402_settlement_v0.1":
         return True
-    inner = receipt.get("receipt")
-    if isinstance(inner, dict) and inner.get("profile") == "sar-402":
+    if receipt.get("profile") == "sar-402":
         return True
     return False
 
 
+def compute_sar402_digest(receipt: dict[str, Any]) -> str:
+    """Recompute the SAR-402 ``sorted_keys_compact_v0`` integrity digest.
+
+    ``sorted_keys_compact_v0`` is recursively key-sorted JSON with compact
+    separators over the payload excluding the ``integrity`` block itself
+    (``@defaultsettlement/canonical``'s ``canonicalJson`` /
+    ``sar-402``'s ``computeIntegrity()``). Over this artifact's value domain
+    (objects, strings, null, no floats) it is byte-for-byte what
+    ``json.dumps(..., sort_keys=True, separators=(",", ":"))`` produces.
+    """
+    payload_without_integrity = {key: value for key, value in receipt.items() if key != "integrity"}
+    canonical_json = json.dumps(
+        payload_without_integrity,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+    digest = hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()
+    return f"sha256:{digest}"
+
+
+def verify_sar402_recorded(receipt: dict[str, Any]) -> dict[str, Any]:
+    """Inspect SAR-402 recorded evidence: integrity only, no signature claim.
+
+    SAR-402 recorded evidence is not a signed SAR v0.1 receipt: it carries no
+    ``verifier_kid``/``sig`` and there is no embedded SAR v0.1 receipt to
+    verify. This recomputes the ``sorted_keys_compact_v0`` integrity digest
+    and compares it to the artifact's declared ``integrity.digest`` — an
+    integrity check only, never a signed-receipt, payment-finality, or
+    Path B signature-attribution claim.
+    """
+    integrity_block = receipt.get("integrity")
+    declared_digest = integrity_block.get("digest") if isinstance(integrity_block, dict) else None
+    computed_digest = compute_sar402_digest(receipt)
+    integrity = "PASS" if declared_digest is not None and computed_digest == declared_digest else "FAIL"
+
+    return {
+        "artifact_type": "sar_402_recorded_evidence",
+        "schema_id": receipt.get("schema_id"),
+        "profile": receipt.get("profile"),
+        "declared_digest": declared_digest,
+        "computed_digest": computed_digest,
+        "integrity": integrity,
+        "signature_authentication": SIGNATURE_NOT_APPLICABLE,
+        "signature_detail": (
+            "No verifier_kid/sig present; SAR-402 recorded evidence is unsigned "
+            "in this path"
+        ),
+        "message": (
+            "SAR-402 recorded evidence; no signed SAR v0.1 receipt claim, no "
+            "payment-finality claim, no Path B signature-attribution claim"
+        ),
+    }
+
+
 def verify_sar_receipt(receipt: dict[str, Any]) -> dict[str, Any]:
     if is_sar_402_recorded(receipt):
-        return {
-            "receipt_type": "sar_402_settlement",
-            "receipt_id": receipt.get("receipt_id"),
-            "integrity": SIGNATURE_NOT_APPLICABLE,
-            "signature_authentication": SIGNATURE_NOT_APPLICABLE,
-            "signature_verification": SIGNATURE_NOT_APPLICABLE,
-            "status": SIGNATURE_NOT_APPLICABLE,
-            "message": (
-                "recorded SAR-402 receipt; no SettlementWitness Ed25519 signature"
-            ),
-        }
+        return verify_sar402_recorded(receipt)
 
     missing_fields = [
         field
@@ -698,18 +747,21 @@ def handle_verify(args: argparse.Namespace) -> int:
 
     if args.json:
         print(json.dumps(result, indent=2, sort_keys=True))
-    elif result.get("receipt_type") == "sar_402_settlement":
+    elif result.get("artifact_type") == "sar_402_recorded_evidence":
         print_summary(
             [
-                ("Receipt ID", result["receipt_id"]),
-                ("Receipt Type", "sar_402_settlement"),
+                ("Artifact Type", "SAR-402 recorded evidence"),
+                ("Schema ID", result["schema_id"]),
+                ("Declared Digest", result["declared_digest"]),
+                ("Computed Digest", result["computed_digest"]),
                 ("Integrity", result["integrity"]),
                 ("Signature Authentication", result["signature_authentication"]),
             ]
         )
         print()
+        print(result["signature_detail"])
         print(result["message"])
-        return 0
+        return 0 if result["integrity"] == "PASS" else 1
     else:
         print_summary(
             [
@@ -726,8 +778,8 @@ def handle_verify(args: argparse.Namespace) -> int:
         print()
         print(result["signature_detail"])
 
-    if result.get("receipt_type") == "sar_402_settlement":
-        return 0
+    if result.get("artifact_type") == "sar_402_recorded_evidence":
+        return 0 if result["integrity"] == "PASS" else 1
 
     integrity_ok = result["integrity"] == "PASS"
     signature_ok = result["signature_authentication"] != SIGNATURE_FAIL
