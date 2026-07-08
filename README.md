@@ -167,6 +167,9 @@ defaultsettle chain sha256:<chain_id> --json
 - **Default endpoint** is `https://defaultverifier.com`; override with
   `--base-url` for a different environment.
 
+See [EGRESS.md](EGRESS.md) and [SECURITY.md](SECURITY.md) for the full
+network-behavior and security policy detail.
+
 ## Development
 
 Run from source without installing:
