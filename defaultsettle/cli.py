@@ -35,11 +35,30 @@ SAR_RECEIPT_REQUIRED_FIELDS = (
     "receipt_id",
 )
 
+# Signed-core field set for SAR v0.1. Matches the fixed allow-list canonicalized
+# by DefaultVerifier MCP (sarVerifier.js CORE_REQUIRED/buildCore) and the
+# SettlementWitness skill (verify_receipt.py _CORE_REQUIRED/_core_without_sig).
+# Only these fields, plus ``counterparty`` when present and non-empty, are
+# canonicalized and signed; non-core fields (``sar_version``, ``receipt_id``,
+# ``sig``, etc.) must never affect the digest.
+SAR_CORE_FIELDS = (
+    "task_id_hash",
+    "verdict",
+    "confidence",
+    "reason_code",
+    "ts",
+    "verifier_kid",
+)
+
 # Trusted DefaultVerifier signing keys, keyed by ``verifier_kid``. Only keys
 # published here are accepted; key material embedded in a receipt is never
 # trusted. Each value is the raw 32-byte Ed25519 public key, base64url-encoded
-# (the JWK ``x`` parameter for an OKP/Ed25519 key).
+# (the JWK ``x`` parameter for an OKP/Ed25519 key). Matches the registry
+# bundled by DefaultVerifier MCP (``keys/sar-keys.json``) and the
+# SettlementWitness skill.
 TRUSTED_VERIFIER_KEYS = {
+    "sar-prod-ed25519-01": "n0OM0xBI3wCfJW4_PwUY8zy4yFEArOJQGnqS9CnEfX8",
+    "sar-prod-ed25519-02": "2a_BEldn8DHwfU-Gi3QmYbIZ6TB0mBn6HrXTA6BHAgI",
     "sar-prod-ed25519-03": "2a_BEldn8DHwfU-Gi3QmYbIZ6TB0mBn6HrXTA6BHAgI",
 }
 
@@ -521,14 +540,23 @@ def canonicalize_json_value(value: Any) -> Any:
     return value
 
 
+def build_sar_core(receipt: dict[str, Any]) -> dict[str, Any]:
+    """Build the signed SAR v0.1 core object from a receipt.
+
+    Mirrors the MCP's ``buildCore`` and the SettlementWitness skill's
+    ``_core_without_sig``: only :data:`SAR_CORE_FIELDS`, plus ``counterparty``
+    when present and non-empty, are included.
+    """
+    core: dict[str, Any] = {field: receipt.get(field) for field in SAR_CORE_FIELDS}
+    counterparty = receipt.get("counterparty")
+    if isinstance(counterparty, str) and counterparty.strip():
+        core["counterparty"] = counterparty.strip()
+    return core
+
+
 def compute_receipt_id(receipt: dict[str, Any]) -> str:
-    canonical_fields = {
-        key: value
-        for key, value in receipt.items()
-        if key not in {"receipt_id", "sig"}
-    }
     canonical_json = json.dumps(
-        canonicalize_json_value(canonical_fields),
+        canonicalize_json_value(build_sar_core(receipt)),
         sort_keys=True,
         separators=(",", ":"),
     )

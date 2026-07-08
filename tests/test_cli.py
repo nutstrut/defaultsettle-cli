@@ -13,6 +13,7 @@ from pathlib import Path
 from defaultsettle import cli
 
 EXAMPLE_RECEIPT = Path(__file__).resolve().parent.parent / "examples" / "receipt.json"
+FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
 
 
 class ParserTests(unittest.TestCase):
@@ -155,6 +156,48 @@ class SignatureAuthenticationTests(unittest.TestCase):
         prefixed = receipt["sig"]
         bare = prefixed[len("base64url:") :]
         self.assertEqual(cli.parse_signature(prefixed), cli.parse_signature(bare))
+
+
+class SharedFixtureParityTests(unittest.TestCase):
+    """Verify the shared MCP/SettlementWitness SAR v0.1 fixtures.
+
+    These fixtures carry ``sar_version`` and are signed by kid-01/kid-02/kid-03
+    — exactly the cases the core-field allow-list and expanded key registry
+    fix are meant to cover.
+    """
+
+    def test_pass_fixture_verifies(self) -> None:
+        receipt = cli.load_receipt(FIXTURES_DIR / "sar-v0.1-pass.json")
+        result = cli.verify_sar_receipt(receipt)
+        self.assertEqual(result["integrity"], "PASS")
+        self.assertEqual(result["signature_authentication"], cli.SIGNATURE_PASS)
+
+    def test_fail_fixture_verifies(self) -> None:
+        receipt = cli.load_receipt(FIXTURES_DIR / "sar-v0.1-fail.json")
+        result = cli.verify_sar_receipt(receipt)
+        self.assertEqual(result["integrity"], "PASS")
+        self.assertEqual(result["signature_authentication"], cli.SIGNATURE_PASS)
+        self.assertEqual(result["verdict"], "FAIL")
+
+    def test_indeterminate_fixture_verifies(self) -> None:
+        receipt = cli.load_receipt(FIXTURES_DIR / "sar-v0.1-indeterminate.json")
+        result = cli.verify_sar_receipt(receipt)
+        self.assertEqual(result["integrity"], "PASS")
+        self.assertEqual(result["signature_authentication"], cli.SIGNATURE_PASS)
+        self.assertEqual(result["verdict"], "INDETERMINATE")
+
+    def test_current_kid03_fixture_verifies(self) -> None:
+        receipt = cli.load_receipt(FIXTURES_DIR / "sar-v0.1-current-kid03.json")
+        result = cli.verify_sar_receipt(receipt)
+        self.assertEqual(result["integrity"], "PASS")
+        self.assertEqual(result["signature_authentication"], cli.SIGNATURE_PASS)
+        self.assertEqual(result["verifier_kid"], "sar-prod-ed25519-03")
+
+    def test_tampered_fixture_fails(self) -> None:
+        receipt = cli.load_receipt(FIXTURES_DIR / "tampered-receipt.json")
+        result = cli.verify_sar_receipt(receipt)
+        self.assertEqual(result["integrity"], "FAIL")
+        self.assertEqual(result["signature_authentication"], cli.SIGNATURE_FAIL)
 
 
 class EntryPointTests(unittest.TestCase):
