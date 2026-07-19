@@ -8,6 +8,7 @@ import binascii
 from datetime import datetime, timezone
 import hashlib
 import json
+import os
 import secrets
 import sys
 import time
@@ -16,6 +17,8 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
+
+from . import registry_snapshot as _registry_snapshot
 
 
 API_BASE_URL = "https://defaultverifier.com/v1"
@@ -50,17 +53,25 @@ SAR_CORE_FIELDS = (
     "verifier_kid",
 )
 
-# Trusted DefaultVerifier signing keys, keyed by ``verifier_kid``. Only keys
-# published here are accepted; key material embedded in a receipt is never
-# trusted. Each value is the raw 32-byte Ed25519 public key, base64url-encoded
-# (the JWK ``x`` parameter for an OKP/Ed25519 key). Matches the registry
-# bundled by DefaultVerifier MCP (``keys/sar-keys.json``) and the
-# SettlementWitness skill.
-TRUSTED_VERIFIER_KEYS = {
-    "sar-prod-ed25519-01": "n0OM0xBI3wCfJW4_PwUY8zy4yFEArOJQGnqS9CnEfX8",
-    "sar-prod-ed25519-02": "2a_BEldn8DHwfU-Gi3QmYbIZ6TB0mBn6HrXTA6BHAgI",
-    "sar-prod-ed25519-03": "2a_BEldn8DHwfU-Gi3QmYbIZ6TB0mBn6HrXTA6BHAgI",
-}
+# Trusted DefaultVerifier signing keys are resolved from the bundled,
+# pinned registry snapshot (``registry_snapshot.py`` /
+# ``sar-keys-snapshot.json``), never hard-coded here and never taken from
+# key material embedded in a receipt. See ``registry_snapshot.py`` for the
+# lifecycle-classification design (current-active vs. historical-retired vs.
+# documented-non-operational-duplicate vs. reserved vs. unknown) and its
+# doctrine citations (D4, D4 shared-identity clarification, D7).
+#
+# ``SAR_KEYS_REGISTRY_PATH`` mirrors the SettlementWitness skill's override
+# variable, mainly for deterministic testing; production use always resolves
+# to the bundled, pinned snapshot unless a caller explicitly overrides it.
+def _load_registry_snapshot() -> "_registry_snapshot.RegistrySnapshot":
+    override = os.environ.get("SAR_KEYS_REGISTRY_PATH")
+    if override:
+        return _registry_snapshot.RegistrySnapshot(override)
+    return _registry_snapshot.load_default_snapshot()
+
+
+_REGISTRY_SNAPSHOT = _load_registry_snapshot()
 
 SIGNATURE_PASS = "PASS"
 SIGNATURE_FAIL = "FAIL"
@@ -602,37 +613,99 @@ def is_signed_settlement_witness(receipt: dict[str, Any]) -> bool:
     return bool(receipt.get("verifier_kid"))
 
 
-def authenticate_signature(receipt: dict[str, Any], digest: bytes) -> tuple[str, str]:
+def classify_signer(kid: str) -> "_registry_snapshot.KeyClassification":
+    """Look up the bundled-registry-snapshot lifecycle classification for a kid."""
+    return _REGISTRY_SNAPSHOT.classify(kid)
+
+
+def authenticate_signature(receipt: dict[str, Any], digest: bytes) -> tuple[str, str, dict[str, Any]]:
     """Authenticate the Ed25519 signature over the receipt digest bytes.
 
-    Returns ``(status, detail)`` where status is one of ``PASS``/``FAIL``/
-    ``not_applicable``. The trusted public key is resolved solely by
-    ``verifier_kid`` against :data:`TRUSTED_VERIFIER_KEYS`; key material embedded
-    in the receipt is never used.
+    Returns ``(status, detail, lifecycle)`` where status is one of
+    ``PASS``/``FAIL``/``not_applicable``. The trusted public key is resolved
+    solely by ``verifier_kid`` against the bundled, pinned registry snapshot
+    (``registry_snapshot.py``); key material embedded in the receipt is never
+    used. ``lifecycle`` reports the signer's lifecycle classification
+    (current-production / historical-retired / documented-non-operational-
+    duplicate / reserved / unknown / wrong-profile) *independently* of
+    whether the signature itself is cryptographically valid — a retired or
+    duplicate key's historical signature still verifies; it is simply never
+    reported as a current production signer (D4, D4 shared-identity
+    clarification, D7).
     """
+    empty_lifecycle: dict[str, Any] = {
+        "signer_lifecycle_status": None,
+        "trusted_current_production_signer": False,
+        "trusted_historical_signer": False,
+        "registry_snapshot_sha256": _REGISTRY_SNAPSHOT.raw_sha256,
+    }
+
     if not is_signed_settlement_witness(receipt):
-        return SIGNATURE_NOT_APPLICABLE, "Not a signed SettlementWitness receipt"
+        return SIGNATURE_NOT_APPLICABLE, "Not a signed SettlementWitness receipt", empty_lifecycle
 
     kid = receipt["verifier_kid"]
-    trusted_key_b64 = TRUSTED_VERIFIER_KEYS.get(kid)
-    if trusted_key_b64 is None:
-        return SIGNATURE_FAIL, f"Unknown verifier_kid: {kid}"
+    classification = classify_signer(kid)
+    lifecycle = {
+        "signer_lifecycle_status": classification.lifecycle_label,
+        "trusted_current_production_signer": classification.is_current_production_signer,
+        "trusted_historical_signer": classification.is_historically_verifiable,
+        "registry_snapshot_sha256": _REGISTRY_SNAPSHOT.raw_sha256,
+    }
+
+    if not classification.present:
+        return SIGNATURE_FAIL, f"Unknown verifier_kid: {kid}", lifecycle
+    if not classification.profile_ok:
+        return (
+            SIGNATURE_FAIL,
+            f"verifier_kid {kid} is registered for a different signing profile "
+            f"({classification.use!r}), not sar_settlement_witness_signing",
+            lifecycle,
+        )
+
+    pub_bytes = _REGISTRY_SNAPSHOT.get_public_key_bytes(kid)
+    if pub_bytes is None:
+        return SIGNATURE_FAIL, f"registry entry for {kid} has no usable public key bytes", lifecycle
 
     try:
         signature = parse_signature(receipt.get("sig"))
     except ValueError as exc:
-        return SIGNATURE_FAIL, str(exc)
+        return SIGNATURE_FAIL, str(exc), lifecycle
 
     # Imported lazily so the rest of the CLI runs without the crypto dependency.
     from cryptography.exceptions import InvalidSignature
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
-    public_key = Ed25519PublicKey.from_public_bytes(decode_base64url(trusted_key_b64))
+    public_key = Ed25519PublicKey.from_public_bytes(pub_bytes)
     try:
         public_key.verify(signature, digest)
     except InvalidSignature:
-        return SIGNATURE_FAIL, "Signature does not match trusted verifier key"
-    return SIGNATURE_PASS, f"Verified against trusted key {kid}"
+        return SIGNATURE_FAIL, "Signature does not match trusted verifier key", lifecycle
+
+    if classification.is_documented_non_operational_duplicate:
+        detail = (
+            f"Signature bytes verify against {kid}, which is a documented "
+            "non-operational duplicate public key (D4 shared-identity "
+            "clarification, 2026-07-12) — never represented as an "
+            "independently active/operational signer. See its registry note "
+            "for the evidenced operational identity for these key bytes."
+        )
+    elif classification.is_current_production_signer:
+        detail = f"Verified against current active production signer {kid}"
+    elif classification.status == "retired":
+        detail = (
+            f"Verified against {kid} (registry status: retired). Historical "
+            "signature remains cryptographically valid; this is not a "
+            "current-production-signer claim."
+        )
+    elif classification.status == "reserved":
+        detail = (
+            f"Verified against {kid} (registry status: reserved). Reserved "
+            "keys are not accepted as current operational signers."
+        )
+    else:
+        detail = f"Verified against {kid} (registry status: unclassified/legacy)"
+
+    return SIGNATURE_PASS, detail, lifecycle
 
 
 def is_sar_402_recorded(receipt: dict[str, Any]) -> bool:
@@ -726,7 +799,7 @@ def verify_sar_receipt(receipt: dict[str, Any]) -> dict[str, Any]:
     # Authenticate against the recomputed digest (the same bytes that back the
     # receipt_id), independent of whether integrity passed.
     digest = bytes.fromhex(computed_receipt_id.split(":", 1)[1])
-    signature_status, signature_detail = authenticate_signature(receipt, digest)
+    signature_status, signature_detail, lifecycle = authenticate_signature(receipt, digest)
 
     return {
         "receipt_id": receipt["receipt_id"],
@@ -738,6 +811,15 @@ def verify_sar_receipt(receipt: dict[str, Any]) -> dict[str, Any]:
         "verifier_kid": receipt.get("verifier_kid"),
         "signature_authentication": signature_status,
         "signature_detail": signature_detail,
+        **lifecycle,
+        "offline_verification_note": (
+            "Verified offline against the bundled registry snapshot "
+            f"(sha256:{_REGISTRY_SNAPSHOT.raw_sha256}, source "
+            f"{_registry_snapshot.SNAPSHOT_SOURCE}, dated "
+            f"{_registry_snapshot.SNAPSHOT_DATE}). This confirms the receipt "
+            "against that pinned snapshot only; it does not confirm the live "
+            "registry's current freshness."
+        ),
     }
 
 
@@ -773,10 +855,13 @@ def handle_verify(args: argparse.Namespace) -> int:
                 ("Verifier Key ID", result["verifier_kid"]),
                 ("Integrity", result["integrity"]),
                 ("Signature Authentication", result["signature_authentication"]),
+                ("Signer Lifecycle Status", result["signer_lifecycle_status"]),
+                ("Current Production Signer", result["trusted_current_production_signer"]),
             ]
         )
         print()
         print(result["signature_detail"])
+        print(result["offline_verification_note"])
 
     if result.get("artifact_type") == "sar_402_recorded_evidence":
         return 0 if result["integrity"] == "PASS" else 1
