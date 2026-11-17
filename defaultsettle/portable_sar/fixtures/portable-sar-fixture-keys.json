@@ -1,0 +1,16 @@
+{
+  "fixture-portable-kid-01": {
+    "pubkey_b64url": "nlXjXdfc1qS9CnGsM6dYpyNQ0TZLQuMFdo9s7wSw_UQ",
+    "profiles": [
+      "portable-sar-v0.1"
+    ],
+    "source": "fixture-corpus-static-allowlist"
+  },
+  "fixture-walletbound-kid-01": {
+    "pubkey_b64url": "9MmYKN5wO0hORXzZZxS8ivAQECk6dtE9VGc7511EU3A",
+    "profiles": [
+      "defaultsettlement-walletbound"
+    ],
+    "source": "fixture-corpus-static-allowlist"
+  }
+}

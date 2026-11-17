@@ -18,6 +18,15 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 
+# Additive, separate Portable SAR (six-field, original/portable profile)
+# verification path. Does not touch SAR_CORE_FIELDS, build_sar_core,
+# compute_receipt_id, or verify_sar_receipt above -- those remain the
+# existing wallet-bound verification path, unchanged.
+from defaultsettle.portable_sar.portable_sar_verify import (
+    KeyPolicyEntry as _PortableKeyPolicyEntry,
+    verify_portable_sar_receipt as _verify_portable_sar_receipt,
+)
+
 from . import registry_snapshot as _registry_snapshot
 
 
@@ -982,6 +991,51 @@ def handle_chain(args: argparse.Namespace) -> None:
     )
 
 
+def _load_portable_key_policy(path: Path):
+    """Load a caller-supplied {kid: {pubkey_b64url, profiles, source}} trust
+    policy file for Portable SAR verification. There is no default/bundled
+    trust store for this profile -- unlike the wallet-bound `verify`
+    command, which pins Default Settlement's own production registry, the
+    portable profile is inherently multi-issuer and the caller must state
+    what they trust."""
+    data = json.loads(path.read_text())
+
+    def policy(kid: str):
+        entry = data.get(kid)
+        if entry is None:
+            return None
+        pad = (-len(entry["pubkey_b64url"])) % 4
+        pubkey = base64.urlsafe_b64decode(entry["pubkey_b64url"] + ("=" * pad))
+        return _PortableKeyPolicyEntry(pubkey=pubkey, profiles=frozenset(entry["profiles"]), source=entry["source"])
+
+    return policy
+
+
+def handle_verify_portable(args: argparse.Namespace) -> int:
+    receipt = load_receipt(Path(args.receipt_json))
+    key_policy = _load_portable_key_policy(Path(args.keys))
+    result = _verify_portable_sar_receipt(receipt, key_policy)
+
+    if args.json:
+        print(json.dumps(result.to_dict(), indent=2, sort_keys=True))
+    else:
+        rows = [
+            ("Status", result.status),
+            ("Profile", result.profile or "-"),
+            ("Signed Fields", ", ".join(result.signed_fields) if result.signed_fields else "-"),
+            ("Key ID", result.key_kid or "-"),
+            ("Trust Source", result.trust_source or "-"),
+            (
+                "Unsigned Claims (NOT attested)",
+                json.dumps(result.unsigned_claims) if result.unsigned_claims else "-",
+            ),
+            ("Wallet Binding Attested", str(result.wallet_binding_attested)),
+            ("Reason", result.reason or "-"),
+        ]
+        print_summary(rows)
+    return 0 if result.is_verified() else 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="defaultsettle",
@@ -1021,6 +1075,19 @@ def build_parser() -> argparse.ArgumentParser:
     verify_parser.add_argument("receipt_json")
     verify_parser.add_argument("--json", action="store_true", help="Print verification result as JSON.")
     verify_parser.set_defaults(func=handle_verify)
+
+    verify_portable_parser = subparsers.add_parser(
+        "verify-portable",
+        help="Verify a Portable SAR v0.1 (six-field, original/portable profile) receipt.",
+    )
+    verify_portable_parser.add_argument("receipt_json")
+    verify_portable_parser.add_argument(
+        "--keys",
+        required=True,
+        help="Path to a caller-supplied {kid: {pubkey_b64url, profiles, source}} trust policy JSON file.",
+    )
+    verify_portable_parser.add_argument("--json", action="store_true", help="Print verification result as JSON.")
+    verify_portable_parser.set_defaults(func=handle_verify_portable)
 
     profile_parser = subparsers.add_parser("profile")
     profile_parser.add_argument("agent_id")
