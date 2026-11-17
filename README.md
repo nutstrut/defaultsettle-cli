@@ -122,6 +122,34 @@ defaultsettle verify reports/speedrun/defaultsettle-receipt-<timestamp>.json
 defaultsettle verify examples/receipt.json --json
 ```
 
+### `defaultsettle verify-v02`
+
+Offline verification of a Default Settlement **v0.2-candidate** receipt
+(`receipt_version: "0.2-candidate"`; profiles `settlement-witness-verified-v0.2` and
+`...-counterparty-bound`). Additive: `verify` is unchanged, and v0.1 or portable receipts are
+rejected here (`NOT_A_V02_RECEIPT`), never upgraded.
+
+```bash
+defaultsettle verify-v02 receipt.json
+```
+
+- stdout: one JSON document, nothing else. stderr: diagnostics.
+- **Exit 0 = the receipt is valid, whatever the issuer verdict.** A valid `PASS`, `FAIL` or `INDETERMINATE`
+  receipt all exit 0 and report `receipt_valid: true`; the verdict is separate (`issuer_verdict`).
+  Exit 1 = receipt invalid or untrusted (bad signature, unknown key, ...). Exit 2 = usage error or unreadable
+  / non-JSON input.
+- No network. Trust root is the bundled, pinned snapshot of the full `/.well-known/sar-keys.json` registry
+  (`defaultsettle/sar-keys-v02-snapshot.json`; provenance and sha256 reported in the output under
+  `issuer.trust_snapshot`, and re-checked at load). It is never refreshed from the network. An unknown
+  `verifier_kid` fails closed.
+- `boundary` maps signed `pass`/`fail`/`unknown` to `established`/`contradicted`/`not_established` and lists what
+  the receipt does **not** imply (runtime execution, payment finality, legal finality unless signed `pass`; always
+  current admissibility, external effect, general agent safety, endorsement, certification). `unsigned_fields_present`
+  lists fields outside the signature (e.g. `_unsigned`, `payment`), which never affect validity.
+
+Normative contract and shared vectors: `specs/default-settlement-v02-verification/v0.2-candidate/` in the
+Morpheus repository. Tests: `python3 -m pytest tests/test_verify_v02.py`.
+
 ### `defaultsettle activate`
 
 Register and natively activate a real agent of your own.
