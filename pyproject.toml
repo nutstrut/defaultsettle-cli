@@ -38,4 +38,4 @@ defaultsettle = "defaultsettle.cli:main"
 packages = ["defaultsettle"]
 
 [tool.setuptools.package-data]
-defaultsettle = ["sar-keys-snapshot.json"]
+defaultsettle = ["sar-keys-snapshot.json", "sar-keys-v02-snapshot.json", "sar-keys-v02-snapshot.provenance.json"]

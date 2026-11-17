@@ -1,0 +1,8 @@
+{
+  "snapshot_file": "sar-keys-snapshot.json",
+  "source": "https://defaultverifier.com/.well-known/sar-keys.json",
+  "fetched_on": "2026-11-17",
+  "sha256": "1a8baffeecb456e823f1d9e4a1f84e4b1dd7a5152a7b36ee06da37b0d0cebe86",
+  "byte_identical_to": "settlement-witness/sar-keys.json at repo HEAD cae818c (compared by sha256 on the fetch date)",
+  "notes": "Full registry, not JWKS. Carries kid, status, use, purpose and per-key `profiles`. Immutable at runtime; verification never fetches or refreshes it. A refresh is a separate, explicit, reviewed act that produces a new snapshot file with new provenance."
+}
