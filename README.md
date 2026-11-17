@@ -112,6 +112,21 @@ endpoints. It does not post anything externally, does not move money or sign a
 wallet transaction, does not use OAuth, and needs no local services. It writes a
 report and the receipt to `reports/speedrun/`.
 
+### Verifier entry points at a glance
+
+Three separate offline verifiers. None issues a receipt, none contacts SettlementWitness, and none upgrades
+or reinterprets another's receipts. Verification ≠ issuance; offline verification ≠ hosted evaluation.
+
+| Command | Receipt family | Trust root | Network | Exit codes |
+|---------|----------------|-----------|---------|------------|
+| `defaultsettle verify <receipt.json>` | Default Settlement v0.1 (wallet-bound; also SAR-402 recorded receipts, integrity only) | bundled pinned registry snapshot | none | 0 = integrity and signature OK; 1 = otherwise |
+| `defaultsettle verify-portable <receipt.json> --keys <policy.json>` | Portable SAR v0.1 (six-field profile) | caller-supplied key policy (no default) | none | 0 = verified; 1 = not verified |
+| `defaultsettle verify-v02 <receipt.json>` | Default Settlement `0.2-candidate` | bundled pinned registry snapshot | none | 0 = receipt valid (any issuer verdict); 1 = invalid/untrusted; 2 = usage/unreadable |
+
+For `verify-v02`: `receipt_valid` is separate from the issuer verdict. A valid `FAIL` or `INDETERMINATE`
+receipt exits 0. `0.2-candidate` is supported literally and is not renamed to a finalized `0.2`.
+`speedrun`/`demo`, `activate`, `profile` and `chain` are the only commands that use the network.
+
 ### `defaultsettle verify`
 
 Verify a saved SAR receipt locally (offline): receipt integrity plus Ed25519
@@ -120,6 +135,16 @@ signature authentication for signed receipts.
 ```bash
 defaultsettle verify reports/speedrun/defaultsettle-receipt-<timestamp>.json
 defaultsettle verify examples/receipt.json --json
+```
+
+### `defaultsettle verify-portable`
+
+Offline verification of a Portable SAR v0.1 (six-field) receipt against a caller-supplied trust policy
+(`--keys policy.json`, `{kid: {pubkey_b64url, profiles, source}}`); there is no bundled trust store for this
+profile. `counterparty` / `_ext` are reported as unsigned, never as an attested wallet binding.
+
+```bash
+defaultsettle verify-portable receipt.json --keys policy.json --json
 ```
 
 ### `defaultsettle verify-v02`
