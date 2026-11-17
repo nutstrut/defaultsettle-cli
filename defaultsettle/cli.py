@@ -1036,6 +1036,59 @@ def handle_verify_portable(args: argparse.Namespace) -> int:
     return 0 if result.is_verified() else 1
 
 
+V02_SNAPSHOT_PATH = Path(__file__).resolve().parent / "sar-keys-v02-snapshot.json"
+V02_PROVENANCE_PATH = Path(__file__).resolve().parent / "sar-keys-v02-snapshot.provenance.json"
+
+
+def load_v02_trust() -> tuple[Any, dict[str, Any]]:
+    """Load the bundled, pinned v0.2 trust snapshot. The file is read-only data:
+    it is never refreshed or overwritten from the network. A hash mismatch
+    against the recorded provenance is fatal."""
+    raw = V02_SNAPSHOT_PATH.read_bytes()
+    provenance = json.loads(V02_PROVENANCE_PATH.read_text(encoding="utf-8"))
+    actual = hashlib.sha256(raw).hexdigest()
+    if actual != provenance["sha256"]:
+        raise RuntimeError("bundled v0.2 trust snapshot does not match its recorded sha256")
+    return json.loads(raw), {
+        "source": provenance["source"],
+        "fetched_on": provenance["fetched_on"],
+        "sha256": actual,
+    }
+
+
+def handle_verify_v02(args: argparse.Namespace) -> int:
+    """Offline Default Settlement v0.2-candidate receipt verification.
+
+    Exit 0 = receipt valid (any issuer verdict); 1 = receipt invalid/untrusted;
+    2 = usage error or unreadable input. stdout is JSON only; stderr is diagnostics.
+    """
+    from . import verify_v02 as v02
+
+    try:
+        text = Path(args.receipt_json).read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        print(f"error: cannot read {args.receipt_json}: {exc}", file=sys.stderr)
+        return 2
+    try:
+        registry, provenance = load_v02_trust()
+    except (OSError, ValueError, KeyError, RuntimeError) as exc:
+        print(f"error: trust snapshot unusable: {exc}", file=sys.stderr)
+        return 2
+    try:
+        result = v02.verify_receipt_text(text, registry, provenance)
+    except v02.TrustPolicyError as exc:
+        print(f"error: trust snapshot unusable: {exc}", file=sys.stderr)
+        return 2
+    # ensure_ascii=True: echoed receipt strings may hold lone surrogates (malformed input), which
+    # cannot be encoded to UTF-8 on stdout. Escaping keeps stdout valid JSON and loses nothing.
+    print(json.dumps(result, indent=2, ensure_ascii=True))
+    rejection = result["rejection"]
+    if rejection is not None:
+        print(f"receipt invalid: {rejection['code']}: {rejection['detail']}", file=sys.stderr)
+        return 2 if rejection["code"] == "MALFORMED_JSON" else 1
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="defaultsettle",
@@ -1088,6 +1141,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     verify_portable_parser.add_argument("--json", action="store_true", help="Print verification result as JSON.")
     verify_portable_parser.set_defaults(func=handle_verify_portable)
+
+    verify_v02_parser = subparsers.add_parser(
+        "verify-v02",
+        help="Offline verification of a v0.2-candidate receipt (exit 0 = receipt valid, any verdict).",
+    )
+    verify_v02_parser.add_argument("receipt_json")
+    verify_v02_parser.set_defaults(func=handle_verify_v02)
 
     profile_parser = subparsers.add_parser("profile")
     profile_parser.add_argument("agent_id")
