@@ -12,6 +12,8 @@ import hashlib
 import io
 import json
 import socket
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -220,6 +222,121 @@ class CliTests(unittest.TestCase):
 
     def test_existing_verify_subcommand_still_parses(self) -> None:
         self.assertTrue(callable(cli.build_parser().parse_args(["verify", "x"]).func))
+
+
+class EdgeCaseHardeningTests(unittest.TestCase):
+    """M1-M5 of the independent re-review. Hand-written expectations; not derived from expected_result."""
+
+    REPO = Path(__file__).resolve().parent.parent
+
+    def _cli(self, text: str):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "r.json"
+            path.write_text(text, encoding="utf-8")
+            proc = subprocess.run(
+                [sys.executable, "-m", "defaultsettle.cli", "verify-v02", str(path)],
+                cwd=self.REPO, capture_output=True, timeout=60,
+            )
+        return proc.returncode, proc.stdout, proc.stderr
+
+    # M1 -------------------------------------------------------------------
+    def test_digest_is_sha256_plus_64_lowercase_hex_whole_string(self) -> None:
+        ok = "sha256:" + "0123456789abcdef" * 4
+        self.assertIsNotNone(v02._DIGEST_RE.fullmatch(ok))
+        for bad in ("sha256:" + "z" * 64, "sha256:" + "A" * 64, "sha256:" + "a" * 63, "sha256:" + "a" * 65,
+                    "sha256:" + "a" * 63 + "\U0001F600", "sha256:" + "a" * 62 + "\U0001F600",
+                    "sha256:" + "a" * 64 + "\n", "SHA256:" + "a" * 64, " " + ok):
+            self.assertIsNone(v02._DIGEST_RE.fullmatch(bad), repr(bad))
+
+    def test_non_hex_and_astral_digests_are_rejected_by_the_vectors(self) -> None:
+        for cid in ("digest-evidence-nonhex-z", "digest-evidence-uppercase", "digest-evidence-63-hex",
+                    "digest-evidence-65-hex", "digest-evidence-astral-63hex", "digest-evidence-astral-62hex",
+                    "digest-condition-nonhex-z"):
+            res = _run_case(_case(cid))
+            self.assertFalse(res["receipt_valid"], cid)
+            self.assertEqual(res["rejection"]["code"], "VERIFICATION_BASIS_INVALID", cid)
+        self.assertTrue(_run_case(_case("digest-valid-lowercase-hex-all-nibbles"))["receipt_valid"])
+
+    # M2 -------------------------------------------------------------------
+    def test_adversarial_text_nesting_is_a_normal_rejection_not_an_exception(self) -> None:
+        for text in ("[" * 1_000_000, "[" * 1_000_000 + "]" * 1_000_000, '{"a":' * 200_000 + "1" + "}" * 200_000):
+            value, err = v02.parse_receipt_text(text)
+            self.assertIsNone(value)
+            self.assertEqual(err[0], "MALFORMED_JSON")
+
+    def test_nesting_cap_boundary_in_text(self) -> None:
+        ok, err = v02.parse_receipt_text("[" * v02.MAX_JSON_DEPTH + "]" * v02.MAX_JSON_DEPTH)
+        self.assertIsNone(err)
+        _, err = v02.parse_receipt_text("[" * (v02.MAX_JSON_DEPTH + 1) + "]" * (v02.MAX_JSON_DEPTH + 1))
+        self.assertEqual(err[0], "MALFORMED_JSON")
+        # brackets inside strings are not nesting
+        ok, err = v02.parse_receipt_text('["' + "[" * 500 + '\\"' + "{" * 500 + '"]')
+        self.assertIsNone(err)
+
+    def test_deep_signed_core_is_canonicalization_failed_not_an_exception(self) -> None:
+        deep = "leaf"
+        for _ in range(200_000):
+            deep = [deep]
+        receipt = copy_receipt = dict(_case("valid-pass")["receipt"])
+        basis = dict(receipt["verification_basis"]); basis["x"] = deep
+        receipt["verification_basis"] = basis
+        index = v02.build_trust_index(_registry("test"))
+        res = v02.verify_receipt(copy_receipt, index, None)
+        self.assertEqual(res["rejection"]["code"], "CANONICALIZATION_FAILED")
+        with self.assertRaises(v02.CanonicalizationError):
+            v02.canonicalize(deep)
+
+    def test_cli_does_not_traceback_on_adversarial_nesting(self) -> None:
+        code, out, err = self._cli("[" * 500_000)
+        self.assertEqual(code, 2)
+        self.assertEqual(json.loads(out)["rejection"]["code"], "MALFORMED_JSON")
+        self.assertNotIn(b"Traceback", err)
+
+    # M3 -------------------------------------------------------------------
+    def test_cli_lone_surrogate_echo_is_valid_json_without_traceback(self) -> None:
+        case = _case("output-lone-surrogate-echoed-version-raw")
+        for cid in ("output-lone-surrogate-echoed-version-raw", "output-lone-surrogate-echoed-profile-raw",
+                    "output-lone-surrogate-echoed-kid-raw", "output-lone-surrogate-echoed-receipt-id-raw"):
+            code, out, err = self._cli(_case(cid)["receipt_raw"])
+            self.assertEqual(code, 1, cid)
+            self.assertNotIn(b"Traceback", err, cid)
+            self.assertNotIn(b"UnicodeEncodeError", err, cid)
+            out.decode("ascii")  # pure ASCII on stdout
+            parsed = json.loads(out)
+            self.assertFalse(parsed["receipt_valid"])
+            # (the CLI uses the pinned production snapshot, where the test kid is unknown)
+            want = "UNKNOWN_KEY" if cid.endswith("receipt-id-raw") else _case(cid)["expect"]["rejection_code"]
+            self.assertEqual(parsed["rejection"]["code"], want, cid)
+            self.assertIn(parsed["rejection"]["code"].encode(), err)  # stderr carries the diagnostic
+        # the surrogate is preserved (escaped), not silently dropped
+        code, out, _ = self._cli(case["receipt_raw"])
+        self.assertEqual(json.loads(out)["receipt"]["receipt_version"], "0.2-candidate\ud800")
+
+    # M4 -------------------------------------------------------------------
+    def test_huge_integer_in_unsigned_field_is_valid_and_in_signed_core_is_rejected(self) -> None:
+        for cid in ("number-unsigned-huge-5000-digits-raw", "number-unsigned-huge-negative-5000-digits-raw",
+                    "number-unsigned-exp-overflow-raw", "number-unsigned-2^53-raw"):
+            self.assertTrue(_run_case(_case(cid))["receipt_valid"], cid)
+        for cid in ("number-signed-huge-5000-digits-raw", "number-signed-19-digits-raw", "number-signed-exp-overflow-raw"):
+            self.assertEqual(_run_case(_case(cid))["rejection"]["code"], "CANONICALIZATION_FAILED", cid)
+
+    def test_very_large_integer_token_parses_in_bounded_time(self) -> None:
+        value, err = v02.parse_receipt_text('{"n":' + "9" * 1_000_000 + "}")
+        self.assertIsNone(err)
+        self.assertEqual(value["n"], float("inf"))
+        value, err = v02.parse_receipt_text('{"n":123456789012345678}')
+        self.assertEqual(value["n"], 123456789012345678)
+
+    # M5 (Python reference preserves the name; the vectors pin that JS must too) ----------
+    def test_signed_proto_property_is_reported_in_its_bucket(self) -> None:
+        res = _run_case(_case("proto-signed-property-pass"))
+        self.assertEqual(res["signed_properties"]["__proto__"], "pass")
+        self.assertIn("__proto__", res["boundary"]["established"])
+        self.assertEqual(res["boundary"]["properties"]["__proto__"], "established")
+        res = _run_case(_case("proto-signed-property-fail"))
+        self.assertIn("__proto__", res["boundary"]["contradicted"])
+        res = _run_case(_case("proto-signed-property-unknown"))
+        self.assertIn("__proto__", res["boundary"]["not_established"])
 
 
 if __name__ == "__main__":

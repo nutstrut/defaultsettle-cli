@@ -1025,7 +1025,9 @@ def handle_verify_v02(args: argparse.Namespace) -> int:
     except v02.TrustPolicyError as exc:
         print(f"error: trust snapshot unusable: {exc}", file=sys.stderr)
         return 2
-    print(json.dumps(result, indent=2, ensure_ascii=False))
+    # ensure_ascii=True: echoed receipt strings may hold lone surrogates (malformed input), which
+    # cannot be encoded to UTF-8 on stdout. Escaping keeps stdout valid JSON and loses nothing.
+    print(json.dumps(result, indent=2, ensure_ascii=True))
     rejection = result["rejection"]
     if rejection is not None:
         print(f"receipt invalid: {rejection['code']}: {rejection['detail']}", file=sys.stderr)

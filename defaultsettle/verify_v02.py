@@ -130,6 +130,16 @@ NON_CLAIMS = (
 )
 
 _RECEIPT_ID_RE = re.compile(r"sha256:[0-9a-f]{64}")
+# Every SHA-256 digest string in the contract (receipt_id, condition_digest, evidence_digest) is
+# exactly `sha256:` + 64 lowercase hex characters, matched against the WHOLE string. Length alone
+# is not the rule: code-point length (Python) and UTF-16 length (JavaScript) disagree on astral text.
+_DIGEST_RE = _RECEIPT_ID_RE
+# Normative nesting cap, enforced identically in every implementation (SPEC section 3a).
+# A container (object or array) at nesting depth > MAX_JSON_DEPTH is rejected; the outermost
+# container is depth 1.
+MAX_JSON_DEPTH = 64
+# Integer tokens longer than this are never exact safe integers; see parse_receipt_text.
+_MAX_EXACT_INT_TOKEN = 18
 _SIG_BODY_RE = re.compile(r"[A-Za-z0-9_-]{86}")
 _B64URL_RE = re.compile(r"[A-Za-z0-9_-]+")
 
@@ -165,7 +175,7 @@ def _jcs_string(s: str) -> str:
     return json.dumps(s, ensure_ascii=False)
 
 
-def _jcs_value(v: Any) -> str:
+def _jcs_value(v: Any, depth: int = 0) -> str:
     if v is None:
         return "null"
     if v is True:
@@ -182,19 +192,24 @@ def _jcs_value(v: Any) -> str:
         if not math.isfinite(v) or v != math.floor(v) or abs(v) >= 2**53:
             raise CanonicalizationError("non-integral or non-finite number is not supported")
         return str(int(v))
+    if isinstance(v, (list, dict)) and depth + 1 > MAX_JSON_DEPTH:
+        raise CanonicalizationError("nesting exceeds the maximum depth")
     if isinstance(v, list):
-        return "[" + ",".join(_jcs_value(i) for i in v) + "]"
+        return "[" + ",".join([_jcs_value(i, depth + 1) for i in v]) + "]"
     if isinstance(v, dict):
         for k in v:
             if not isinstance(k, str):
                 raise CanonicalizationError("object key is not a string")
         items = sorted(v.items(), key=lambda kv: kv[0].encode("utf-16-be", "surrogatepass"))
-        return "{" + ",".join(_jcs_string(k) + ":" + _jcs_value(val) for k, val in items) + "}"
+        return "{" + ",".join([_jcs_string(k) + ":" + _jcs_value(val, depth + 1) for k, val in items]) + "}"
     raise CanonicalizationError("unsupported JSON value type")
 
 
 def canonicalize(value: Any) -> bytes:
-    text = _jcs_value(value)
+    try:
+        text = _jcs_value(value)
+    except RecursionError as exc:  # defensive: the explicit depth cap should always fire first
+        raise CanonicalizationError("nesting exceeds the interpreter limit") from exc
     try:
         return text.encode("utf-8")
     except UnicodeEncodeError as exc:  # lone surrogate
@@ -238,13 +253,57 @@ def _reject_constant(name):
     raise ValueError("non-finite JSON constant " + name)
 
 
+def _json_depth_exceeds(text: str, limit: int) -> bool:
+    """True if the text nests containers deeper than `limit`. String-aware, linear, and
+    syntax-agnostic (it never needs the text to be valid JSON). Identical in every
+    implementation, so a depth rejection is the same everywhere."""
+    depth = 0
+    in_string = False
+    escaped = False
+    for ch in text:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+        elif ch == '"':
+            in_string = True
+        elif ch == "[" or ch == "{":
+            depth += 1
+            if depth > limit:
+                return True
+        elif ch == "]" or ch == "}":
+            depth -= 1
+    return False
+
+
+def _parse_int_token(token: str) -> Any:
+    """Integer tokens beyond 18 characters are not safe integers whatever their value and
+    would otherwise trip CPython's integer-string conversion limit (a parse failure JavaScript
+    does not share). They become a float, as JavaScript's Number() does: such a value is
+    rejected inside the signed core (CANONICALIZATION_FAILED) and inert in unsigned fields."""
+    return int(token) if len(token) <= _MAX_EXACT_INT_TOKEN else float(token)
+
+
 def parse_receipt_text(text: str) -> tuple[Any, Optional[tuple[str, str]]]:
     """Returns (value, None) or (None, (code, detail))."""
+    if _json_depth_exceeds(text, MAX_JSON_DEPTH):
+        return None, ("MALFORMED_JSON", "input is not valid JSON")
     try:
-        return json.loads(text, object_pairs_hook=_no_dupes, parse_constant=_reject_constant), None
+        return (
+            json.loads(
+                text,
+                object_pairs_hook=_no_dupes,
+                parse_constant=_reject_constant,
+                parse_int=_parse_int_token,
+            ),
+            None,
+        )
     except DuplicateKeyError:
         return None, ("DUPLICATE_KEY", "receipt JSON contains a duplicate object key")
-    except ValueError:
+    except (ValueError, RecursionError):
         return None, ("MALFORMED_JSON", "input is not valid JSON")
 
 
@@ -507,10 +566,10 @@ def _verify(receipt: Any, trust_index: dict, result: dict) -> None:
     bad_basis = [f for f in BASIS_FIELDS if not _nonempty_str(basis[f])]
     for f in ("condition_digest", "evidence_digest"):
         v = basis[f]
-        if f not in bad_basis and not (v.startswith("sha256:") and len(v) == 71):
+        if f not in bad_basis and not _DIGEST_RE.fullmatch(v):
             bad_basis.append(f)
     if bad_basis:
-        raise _Reject("VERIFICATION_BASIS_INVALID", "verification_basis field empty or malformed", fields=bad_basis)
+        raise _Reject("VERIFICATION_BASIS_INVALID", "verification_basis field empty or malformed", fields=_u16sorted(bad_basis))
 
     if "counterparty" in core_fields and not _nonempty_str(receipt["counterparty"]):
         raise _Reject("COUNTERPARTY_INVALID", "counterparty-bound profile requires a non-empty counterparty")

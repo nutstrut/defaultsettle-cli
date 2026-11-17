@@ -146,6 +146,10 @@ defaultsettle verify-v02 receipt.json
   the receipt does **not** imply (runtime execution, payment finality, legal finality unless signed `pass`; always
   current admissibility, external effect, general agent safety, endorsement, certification). `unsigned_fields_present`
   lists fields outside the signature (e.g. `_unsigned`, `payment`), which never affect validity.
+- `established` means *established as an authentic issuer-signed property of the receipt*, not independently
+  verified external truth. Digests must be `sha256:` + 64 lowercase hex. Input nested deeper than 64 containers is
+  `MALFORMED_JSON`; out-of-range numbers are rejected in the signed core and inert in unsigned fields. stdout is
+  always valid ASCII JSON, even when a malformed receipt echoes lone surrogates.
 
 Normative contract and shared vectors: `specs/default-settlement-v02-verification/v0.2-candidate/` in the
 Morpheus repository. Tests: `python3 -m pytest tests/test_verify_v02.py`.
